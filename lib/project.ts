@@ -1,4 +1,4 @@
-import type { NormalizedRect, RecordingMode, StudioProject, ZoomEvent } from "@/types/project";
+import type { AudioProjectState, AudioTrackType, NormalizedRect, PointerEventMetadata, RecordingMode, StudioProject, ZoomEvent } from "@/types/project";
 
 export const FULL_FRAME: NormalizedRect = { x: 0, y: 0, width: 1, height: 1 };
 
@@ -44,6 +44,34 @@ export function mergeNearbyZooms(events: ZoomEvent[], threshold = 0.45): ZoomEve
     }, []);
 }
 
+export function createDefaultAudioState(): AudioProjectState {
+  const track = (type: AudioTrackType) => ({ type, muted: false, solo: false, volume: type === "music" ? .45 : 1, fadeIn: 0, fadeOut: 0 });
+  return {
+    tracks: {
+      microphone: track("microphone"),
+      "computer-audio": track("computer-audio"),
+      voiceover: track("voiceover"),
+      music: track("music"),
+    },
+    clips: [],
+    waveforms: {},
+    ducking: { enabled: false, amount: "medium" },
+  };
+}
+
+export function deriveZoomEvents(clicks: PointerEventMetadata[], threshold = .45): ZoomEvent[] {
+  return mergeNearbyZooms(clicks.map((click) => ({
+    id: click.id,
+    time: Math.max(0, click.time),
+    x: clamp(click.x, 0, 1),
+    y: clamp(click.y, 0, 1),
+    scale: 1.5,
+    duration: 1.45,
+    enabled: true,
+    source: "automatic" as const,
+  })), threshold);
+}
+
 export function editedTimestamp(project: StudioProject, timestamp: number, trimStart = 0): number | null {
   const sourceTimestamp = timestamp + trimStart;
   const sorted = project.edits.filter((edit) => edit.type === "delete" && edit.end > edit.start).sort((a, b) => a.start - b.start);
@@ -74,21 +102,39 @@ export function createProject(mode: RecordingMode, now = new Date()): StudioProj
     crop: FULL_FRAME,
     camera: { visible: mode !== "screen", shape: "circle", rect: { x: 0.76, y: 0.68, width: 0.2, height: 0.27 } },
     zoomEvents: [],
+    pointerEvents: [],
     cursor: { style: "system", size: 1, opacity: 1, shadow: true, smoothing: 0.65, clickEffect: "pulse" },
     canvas: { aspectRatio: "16:9", background: "#7563ea", fit: "fit", scale: 0.9 },
+    background: { type: "gradient", value: "linear-gradient(135deg, #7563ea 0%, #32256f 100%)", fit: "fill", blur: 24, brightness: .7 },
+    presentation: { scale: .88, x: .5, y: .5, padding: .06, cornerRadius: 18, shadow: .7, frame: "floating" },
+    audio: createDefaultAudioState(),
+    assets: [],
     trim: { start: 0, end: null },
     edits: [],
   };
 }
 
 export function normalizeProject(project: StudioProject): StudioProject {
+  const audioDefaults = createDefaultAudioState();
   return {
     ...project,
     crop: project.crop ?? FULL_FRAME,
     camera: project.camera ?? { visible: project.mode !== "screen", shape: "circle", rect: { x: .76, y: .68, width: .2, height: .27 } },
-    zoomEvents: project.zoomEvents ?? [],
+    zoomEvents: (project.zoomEvents ?? []).map((event) => ({ enabled: true, source: "manual", ...event })),
+    pointerEvents: project.pointerEvents ?? [],
     cursor: project.cursor ?? { style: "system", size: 1, opacity: 1, shadow: true, smoothing: .65, clickEffect: "pulse" },
     canvas: project.canvas ?? { aspectRatio: "16:9", background: "#7563ea", fit: "fit", scale: .9 },
+    background: project.background ?? { type: "color", value: project.canvas?.background ?? "#7563ea", fit: "fill", blur: 24, brightness: .7 },
+    presentation: project.presentation ?? { scale: project.canvas?.scale ?? .9, x: .5, y: .5, padding: .06, cornerRadius: 18, shadow: .7, frame: "floating" },
+    audio: {
+      ...audioDefaults,
+      ...(project.audio ?? {}),
+      tracks: { ...audioDefaults.tracks, ...(project.audio?.tracks ?? {}) },
+      clips: project.audio?.clips ?? [],
+      waveforms: project.audio?.waveforms ?? {},
+      ducking: project.audio?.ducking ?? audioDefaults.ducking,
+    },
+    assets: project.assets ?? [],
     trim: project.trim ?? { start: 0, end: null },
     edits: project.edits ?? [],
   };
@@ -103,3 +149,5 @@ export function formatDefaultFilename(date: Date): string {
 export function sanitizeFilename(name: string): string {
   return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").replace(/\s+/g, " ").trim().slice(0, 160) || "Untitled recording";
 }
+
+const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value));
