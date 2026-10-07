@@ -13,7 +13,7 @@ export interface BrowserCapabilities {
 
 export function detectCapabilities(scope: Window = window): BrowserCapabilities {
   const mediaDevices = scope.navigator.mediaDevices;
-  const recorder = typeof MediaRecorder === "undefined" ? undefined : MediaRecorder;
+  const recorder = (scope as Window & { MediaRecorder?: typeof MediaRecorder }).MediaRecorder;
   const mimeTypes = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
   return {
     secureContext: scope.isSecureContext,

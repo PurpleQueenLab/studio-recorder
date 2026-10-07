@@ -1,4 +1,5 @@
 import type { StudioProject } from "@/types/project";
+import { normalizeProject } from "@/lib/project";
 
 const DB_NAME = "studio-recorder";
 const VERSION = 1;
@@ -35,7 +36,24 @@ export class LocalProjectStore {
   async listProjects(): Promise<StudioProject[]> {
     await this.open();
     const projects = await requestResult(this.db!.transaction("projects").objectStore("projects").getAll());
-    return projects.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return projects.map(normalizeProject).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async getProject(id: string): Promise<StudioProject | undefined> {
+    await this.open();
+    const project = await requestResult<StudioProject | undefined>(this.db!.transaction("projects").objectStore("projects").get(id));
+    return project ? normalizeProject(project) : undefined;
+  }
+
+  async deleteProject(id: string): Promise<void> {
+    await this.open();
+    const transaction = this.db!.transaction(["projects", "chunks"], "readwrite");
+    transaction.objectStore("projects").delete(id);
+    transaction.objectStore("chunks").delete(IDBKeyRange.bound([id, "", 0], [id, "\uffff", Number.MAX_SAFE_INTEGER]));
+    await new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error("Could not delete local project"));
+    });
   }
 
   async putChunk(projectId: string, source: string, index: number, blob: Blob): Promise<void> {

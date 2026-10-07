@@ -12,5 +12,8 @@ describe("LocalProjectStore", () => {
     await store.putChunk(project.id, "screen", 0, new Blob(["a"]));
     expect((await store.listProjects())[0].id).toBe(project.id);
     expect(await Promise.all((await store.getChunks(project.id, "screen")).map((chunk) => chunk.text()))).toEqual(["a", "b"]);
+    await store.deleteProject(project.id);
+    expect(await store.getProject(project.id)).toBeUndefined();
+    expect(await store.getChunks(project.id, "screen")).toEqual([]);
   });
 });

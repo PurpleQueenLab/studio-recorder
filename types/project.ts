@@ -1,5 +1,6 @@
 export type RecordingMode = "screen" | "screen-camera" | "camera";
 export type CameraShape = "circle" | "rounded" | "square";
+export type CursorStyle = "system" | "arrow" | "dot" | "large-dot" | "circle" | "hidden";
 
 export interface NormalizedRect {
   x: number;
@@ -18,7 +19,7 @@ export interface ZoomEvent {
 }
 
 export interface ProjectSource {
-  kind: "screen" | "camera" | "microphone" | "computer-audio";
+  kind: "screen" | "camera" | "microphone" | "computer-audio" | "export-audio";
   chunkCount: number;
   mimeType: string;
 }
@@ -34,5 +35,8 @@ export interface StudioProject {
   crop: NormalizedRect;
   camera: { visible: boolean; shape: CameraShape; rect: NormalizedRect };
   zoomEvents: ZoomEvent[];
+  cursor: { style: CursorStyle; size: number; opacity: number; shadow: boolean; smoothing: number; clickEffect: "none" | "pulse" | "ripple" | "scale" };
+  canvas: { aspectRatio: "16:9" | "9:16" | "1:1" | "4:5" | "original"; background: string; fit: "fit" | "fill"; scale: number };
+  trim: { start: number; end: number | null };
   edits: Array<{ type: "trim" | "split" | "delete"; start: number; end: number }>;
 }

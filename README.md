@@ -2,6 +2,8 @@
 
 Studio Recorder is an open-source, browser-based screen recorder and editor designed as a polished local creative tool. It captures screen, camera and microphone sources without uploading user media.
 
+The current editor includes non-destructive crop presets and drag handles, canvas/aspect controls, camera-bubble composition, timeline trim/split/delete markers, focal-point zoom events, cursor styling, undo/redo, and a locally encoded MP4 export path.
+
 ## Privacy model
 
 - No account, authentication, cloud recording, remote media processing or media telemetry.
@@ -52,4 +54,4 @@ For the owner repository, protect `main`, require the CI `quality` job and at le
 
 Issues, forks and pull requests are welcome. Read [CONTRIBUTING.md](./CONTRIBUTING.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) and [SECURITY.md](./SECURITY.md) first. The project uses the [MIT License](./LICENSE).
 
-Major runtime dependencies are Next.js/React (MIT), Tailwind CSS (MIT), and Hugeicons React/core-free-icons (MIT). Figma reference imagery is included only as design-development fixture content and should be replaced by user-owned recordings in production releases.
+Major runtime dependencies are Next.js/React (MIT), Tailwind CSS (MIT), Hugeicons React/core-free-icons (MIT), and MediaBunny (MPL-2.0). See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md). Figma reference imagery is included only as design-development fixture content and should be replaced by user-owned recordings in production releases.

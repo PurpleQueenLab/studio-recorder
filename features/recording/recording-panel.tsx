@@ -6,10 +6,11 @@ import { Camera01Icon, ComputerIcon, Mic01Icon, PauseIcon, PlayIcon, RecordIcon,
 import { CaptureEngine } from "@/lib/media/capture-engine";
 import { LocalProjectStore } from "@/lib/storage/project-store";
 import type { RecordingMode } from "@/types/project";
+import type { StudioProject } from "@/types/project";
 
 type Status = "idle" | "requesting" | "ready" | "recording" | "paused" | "stopped";
 
-export function RecordingPanel({ onSaved }: { onSaved: () => void }) {
+export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) => void }) {
   const [mode, setMode] = useState<RecordingMode>("screen-camera");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
@@ -71,7 +72,7 @@ export function RecordingPanel({ onSaved }: { onSaved: () => void }) {
         {error && <p className="error-message" role="alert">{error}</p>}
         {status === "idle" || status === "stopped" ? <button className="primary wide" onClick={prepare}>Choose sources</button> : status === "ready" ? <button className="primary wide" onClick={() => engine.start()}>Start recording</button> : <div className="record-actions">
           <button className="secondary" aria-label={status === "paused" ? "Resume" : "Pause"} onClick={() => status === "paused" ? engine.resume() : engine.pause()}><HugeiconsIcon icon={status === "paused" ? PlayIcon : PauseIcon} size={18} /></button>
-          <button className="stop-button" onClick={async () => { await engine.stop(); onSaved(); }}><HugeiconsIcon icon={StopIcon} size={17} /> Stop</button>
+          <button className="stop-button" onClick={async () => { const saved = await engine.stop(); if (saved) onSaved(saved); }}><HugeiconsIcon icon={StopIcon} size={17} /> Stop</button>
         </div>}
         <p className="storage-note">Recording chunks are written to browser storage every 2 seconds to keep memory bounded.</p>
       </aside>
