@@ -2,7 +2,7 @@
 
 Studio Recorder is an open-source, browser-based screen recorder and editor designed as a polished local creative tool. It captures screen, camera and microphone sources without uploading user media.
 
-The current editor includes non-destructive crop presets and drag handles, canvas/aspect controls, camera-bubble composition, timeline trim/split/delete markers, focal-point zoom events, cursor styling, undo/redo, and a locally encoded MP4 export path.
+The current editor includes non-destructive crop presets and drag handles, canvas/aspect controls, camera-bubble composition, timeline trim/split/delete markers, focal-point zoom events, cursor styling, undo/redo, and a locally encoded MP4 export path. Camera-only recordings use the camera track as the primary editor and export source. The separate Audio Tools workspace can locally preview an imported file, its waveform, trim range, volume, and fades.
 
 ## Privacy model
 
@@ -10,6 +10,8 @@ The current editor includes non-destructive crop presets and drag handles, canva
 - Recording chunks and project metadata are stored in this browser using IndexedDB.
 - Clearing site data can remove local projects. Save finished videos explicitly to your computer.
 - Vercel may host the static application, but it is not a media store.
+
+Automatic zoom is intentionally limited to clicks Studio Recorder can honestly observe while its own captured tab is visible. Ordinary browser capture does not expose system-wide pointer coordinates for arbitrary windows or screens. Manual focal-point zoom is available for every recording; a future optional native helper could broaden pointer capture without changing the local-first media model.
 
 Chrome and Edge desktop are the primary V1 targets. Safari and Firefox are supported only where runtime capability checks pass. See [BROWSER_CAPABILITIES.md](./BROWSER_CAPABILITIES.md).
 

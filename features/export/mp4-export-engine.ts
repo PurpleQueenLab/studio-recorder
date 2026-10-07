@@ -15,8 +15,8 @@ import {
   type StreamTargetChunk,
 } from "mediabunny";
 import { LocalProjectStore } from "@/lib/storage/project-store";
-import { editedTimestamp, sanitizeFilename } from "@/lib/project";
-import { zoomTransformAt } from "@/lib/editor/composition";
+import { editedTimestamp, formatExportFallback, primaryVideoSourceKind, sanitizeFilename } from "@/lib/project";
+import { previewPointFromSource, zoomSourceRect, zoomTransformAt } from "@/lib/editor/composition";
 import { renderProjectAudioMix } from "@/lib/media/audio-mixer";
 import type { StudioProject } from "@/types/project";
 
@@ -69,19 +69,20 @@ export async function runMp4SelfTest(): Promise<ExportReceipt> {
   return validateCompatibleMp4(new Blob([target.buffer!], { type: "video/mp4" }), "self-test.mp4", true, { width: 640, height: 360 });
 }
 
-export async function exportCompatibleMp4(project: StudioProject, onProgress: ExportProgress): Promise<ExportReceipt> {
+export async function exportCompatibleMp4(project: StudioProject, onProgress: ExportProgress, requestedName?: string): Promise<ExportReceipt> {
   onProgress(.01, "Preparing video");
   const store = new LocalProjectStore();
-  const videoKind = project.mode === "camera" ? "camera" : "screen";
+  const videoKind = primaryVideoSourceKind(project.mode);
   const videoBlob = await sourceBlob(store, project, videoKind);
   const cameraBlob = project.mode === "screen-camera" ? await sourceBlob(store, project, "camera") : null;
   if (!videoBlob) throw new Error("The project has no recoverable video source.");
   const audioBuffer = await renderProjectAudioMix(project, store);
   onProgress(.08, audioBuffer ? "Encoding audio" : "Preparing video");
 
-  const filename = `${sanitizeFilename(project.title)}.mp4`;
+  const baseName = (requestedName || project.title).replace(/\.mp4$/i, "").trim() || formatExportFallback();
+  const filename = `${sanitizeFilename(baseName)}.mp4`;
   const saveWindow = window as SaveWindow;
-  const useFileStream = project.duration > 20 * 60 && Boolean(saveWindow.showSaveFilePicker);
+  const useFileStream = Boolean(saveWindow.showSaveFilePicker);
   if (project.duration > 20 * 60 && !useFileStream) {
     throw new Error("This long export needs Chrome or Edge file streaming. Open the project there and try again.");
   }
@@ -193,14 +194,11 @@ function createCompositor(project: StudioProject, width: number, height: number,
     if (shiftedTimestamp === null) return null;
     drawBackground(context, sample, width, height, project, backgroundBitmap);
     const zoom = zoomTransformAt(project, sourceTimestamp);
-    const crop = project.crop;
-    const scale = zoom?.scale ?? 1;
-    const sourceWidth = sample.displayWidth * crop.width / scale;
-    const sourceHeight = sample.displayHeight * crop.height / scale;
-    const focalX = zoom?.x ?? 0.5;
-    const focalY = zoom?.y ?? 0.5;
-    const sourceX = clamp(sample.displayWidth * (crop.x + crop.width * focalX) - sourceWidth / 2, sample.displayWidth * crop.x, sample.displayWidth * (crop.x + crop.width) - sourceWidth);
-    const sourceY = clamp(sample.displayHeight * (crop.y + crop.height * focalY) - sourceHeight / 2, sample.displayHeight * crop.y, sample.displayHeight * (crop.y + crop.height) - sourceHeight);
+    const sourceRect = zoomSourceRect(project, sourceTimestamp);
+    const sourceWidth = sample.displayWidth * sourceRect.width;
+    const sourceHeight = sample.displayHeight * sourceRect.height;
+    const sourceX = sample.displayWidth * sourceRect.x;
+    const sourceY = sample.displayHeight * sourceRect.y;
     const frameScale = project.presentation.scale * (1 - project.presentation.padding * 2);
     const boxWidth = width * frameScale;
     const boxHeight = height * frameScale;
@@ -236,7 +234,10 @@ function createCompositor(project: StudioProject, width: number, height: number,
         cameraSample.close();
       }
     }
-    if (zoom && project.cursor.style !== "hidden") drawCursor(context, targetX + targetWidth * zoom.x, targetY + targetHeight * zoom.y, project);
+    if (zoom && project.cursor.style !== "hidden") {
+      const cursor = previewPointFromSource(project, sourceTimestamp, zoom.x, zoom.y);
+      drawCursor(context, targetX + targetWidth * cursor.x, targetY + targetHeight * cursor.y, project);
+    }
     return new VideoSample(canvas, { timestamp: shiftedTimestamp, duration: sample.duration });
   };
 }
@@ -390,5 +391,3 @@ function downloadBlob(blob: Blob, filename: string) {
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
-
-const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value));

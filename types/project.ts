@@ -26,6 +26,10 @@ export interface ZoomEvent {
 export interface PointerEventMetadata {
   id: string;
   time: number;
+  clientX: number;
+  clientY: number;
+  observedWidth: number;
+  observedHeight: number;
   x: number;
   y: number;
   clickType: "primary" | "secondary";

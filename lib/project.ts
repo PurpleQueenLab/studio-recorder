@@ -2,6 +2,10 @@ import type { AudioProjectState, AudioTrackType, NormalizedRect, PointerEventMet
 
 export const FULL_FRAME: NormalizedRect = { x: 0, y: 0, width: 1, height: 1 };
 
+export function primaryVideoSourceKind(mode: RecordingMode): "screen" | "camera" {
+  return mode === "camera" ? "camera" : "screen";
+}
+
 export function clampRect(rect: NormalizedRect): NormalizedRect {
   const width = Math.min(1, Math.max(0.05, rect.width));
   const height = Math.min(1, Math.max(0.05, rect.height));
@@ -37,8 +41,9 @@ export function mergeNearbyZooms(events: ZoomEvent[], threshold = 0.45): ZoomEve
     .sort((a, b) => a.time - b.time)
     .reduce<ZoomEvent[]>((merged, event) => {
       const previous = merged.at(-1);
-      if (previous && event.time - previous.time < threshold) {
-        merged[merged.length - 1] = { ...event, time: previous.time };
+      const distance = previous ? Math.hypot(event.x - previous.x, event.y - previous.y) : Number.POSITIVE_INFINITY;
+      if (previous && event.time - previous.time < threshold && distance < .18) {
+        merged[merged.length - 1] = { ...event, time: previous.time, duration: Math.max(previous.duration, event.duration + event.time - previous.time) };
       } else merged.push(event);
       return merged;
     }, []);
@@ -62,11 +67,11 @@ export function createDefaultAudioState(): AudioProjectState {
 export function deriveZoomEvents(clicks: PointerEventMetadata[], threshold = .45): ZoomEvent[] {
   return mergeNearbyZooms(clicks.map((click) => ({
     id: click.id,
-    time: Math.max(0, click.time),
+    time: Math.max(0, click.time - .15),
     x: clamp(click.x, 0, 1),
     y: clamp(click.y, 0, 1),
     scale: 1.5,
-    duration: 1.45,
+    duration: 1.4,
     enabled: true,
     source: "automatic" as const,
   })), threshold);
@@ -121,7 +126,13 @@ export function normalizeProject(project: StudioProject): StudioProject {
     crop: project.crop ?? FULL_FRAME,
     camera: project.camera ?? { visible: project.mode !== "screen", shape: "circle", rect: { x: .76, y: .68, width: .2, height: .27 } },
     zoomEvents: (project.zoomEvents ?? []).map((event) => ({ enabled: true, source: "manual", ...event })),
-    pointerEvents: project.pointerEvents ?? [],
+    pointerEvents: (project.pointerEvents ?? []).map((event) => ({
+      ...event,
+      clientX: event.clientX ?? event.x,
+      clientY: event.clientY ?? event.y,
+      observedWidth: event.observedWidth ?? 1,
+      observedHeight: event.observedHeight ?? 1,
+    })),
     cursor: project.cursor ?? { style: "system", size: 1, opacity: 1, shadow: true, smoothing: .65, clickEffect: "pulse" },
     canvas: project.canvas ?? { aspectRatio: "16:9", background: "#7563ea", fit: "fit", scale: .9 },
     background: project.background ?? { type: "color", value: project.canvas?.background ?? "#7563ea", fit: "fill", blur: 24, brightness: .7 },
@@ -144,6 +155,12 @@ export function formatDefaultFilename(date: Date): string {
   return new Intl.DateTimeFormat("en-US", {
     month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
   }).format(date).replace(", at", " at");
+}
+
+export function formatExportFallback(date = new Date()): string {
+  const datePart = new Intl.DateTimeFormat("en-US", { month: "long", day: "numeric", year: "numeric" }).format(date);
+  const timePart = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).format(date).replace(":", "-");
+  return `${datePart} at ${timePart}`;
 }
 
 export function sanitizeFilename(name: string): string {

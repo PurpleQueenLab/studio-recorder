@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { zoomTransformAt } from "@/lib/editor/composition";
+import { previewPointFromSource, sourcePointFromPreview, zoomSourceRect, zoomTransformAt } from "@/lib/editor/composition";
 import { adjustAudioClip, adjustZoomEvent, clampTimelineTime, timelineTimeFromPosition } from "@/lib/editor/timeline";
 import { clipGainAt, duckingMultiplier, outputDuration, trackFadeAt, trackIsAudible, visibleTimelineSegments } from "@/lib/media/audio-mixer";
 import { createProject, deriveZoomEvents, normalizeProject } from "@/lib/project";
@@ -38,10 +38,13 @@ describe("timeline interaction model", () => {
 describe("zoom and cursor metadata model", () => {
   it("derives automatic zooms only from bounded observed clicks and suppresses bursts", () => {
     const result = deriveZoomEvents([
-      { id: "a", time: 1, x: -2, y: .2, clickType: "primary", scope: "studio-ui" },
-      { id: "b", time: 1.2, x: .8, y: 3, clickType: "primary", scope: "studio-ui" },
+      { id: "a", time: 1, clientX: -20, clientY: 20, observedWidth: 100, observedHeight: 100, x: -2, y: .2, clickType: "primary", scope: "studio-ui" },
+      { id: "b", time: 1.2, clientX: 80, clientY: 300, observedWidth: 100, observedHeight: 100, x: .8, y: 3, clickType: "primary", scope: "studio-ui" },
     ]);
-    expect(result).toEqual([{ id: "b", time: 1, x: .8, y: 1, scale: 1.5, duration: 1.45, enabled: true, source: "automatic" }]);
+    expect(result).toEqual([
+      { id: "a", time: .85, x: 0, y: .2, scale: 1.5, duration: 1.4, enabled: true, source: "automatic" },
+      { id: "b", time: 1.05, x: .8, y: 1, scale: 1.5, duration: 1.4, enabled: true, source: "automatic" },
+    ]);
   });
 
   it("uses a shared eased transform and ignores disabled zooms", () => {
@@ -51,6 +54,16 @@ describe("zoom and cursor metadata model", () => {
     expect(zoomTransformAt(project, 2.6)).toMatchObject({ scale: 2, x: .25, y: .75 });
     project.zoomEvents[0].enabled = false;
     expect(zoomTransformAt(project, 2.6)).toBeNull();
+  });
+
+  it("uses one edge-aware source rectangle for preview and export focal mapping", () => {
+    const project = projectAt();
+    project.zoomEvents = [{ id: "edge", time: 2, x: .98, y: .05, scale: 2, duration: 1.4, enabled: true, source: "manual" }];
+    const rect = zoomSourceRect(project, 2.7);
+    expect(rect).toEqual({ x: .5, y: 0, width: .5, height: .5 });
+    const source = sourcePointFromPreview(project, 2.7, .6, .4);
+    expect(source).toEqual({ x: .8, y: .2 });
+    expect(previewPointFromSource(project, 2.7, source.x, source.y)).toEqual({ x: .6000000000000001, y: .4 });
   });
 });
 

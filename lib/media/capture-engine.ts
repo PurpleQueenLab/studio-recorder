@@ -1,5 +1,6 @@
 import { LocalProjectStore } from "@/lib/storage/project-store";
 import { createProject, deriveZoomEvents } from "@/lib/project";
+import { isStudioTabCapture, PointerCaptureSession } from "@/lib/media/pointer-capture";
 import type { RecordingMode, StudioProject } from "@/types/project";
 
 export type CaptureAudioStatus = {
@@ -12,6 +13,7 @@ type CaptureCallbacks = {
   onState: (state: "requesting" | "ready" | "recording" | "paused" | "stopped") => void;
   onError: (message: string) => void;
   onAudioStatus?: (status: CaptureAudioStatus) => void;
+  onPointerDiagnostic?: (event: { count: number; time: number; x: number; y: number }) => void;
 };
 
 export class CaptureEngine {
@@ -23,8 +25,7 @@ export class CaptureEngine {
   private recorders: MediaRecorder[] = [];
   private pendingWrites: Promise<void>[] = [];
   private project?: StudioProject;
-  private startedAt = 0;
-  private pointerListener?: (event: PointerEvent) => void;
+  private pointerCapture?: PointerCaptureSession;
   private pointerMetadataAvailable = false;
 
   constructor(private store: LocalProjectStore, private callbacks: CaptureCallbacks) {}
@@ -33,27 +34,45 @@ export class CaptureEngine {
     return { screen: this.screen, camera: this.camera, microphone: this.microphone };
   }
 
-  async prepare(mode: RecordingMode, microphone = true, microphoneDeviceId?: string): Promise<void> {
-    this.dispose();
+  async prepareCameraPreview(cameraDeviceId?: string): Promise<MediaStream> {
+    const currentTrack = this.camera?.getVideoTracks()[0];
+    const requestedDevice = cameraDeviceId || undefined;
+    if (currentTrack?.readyState === "live" && (!requestedDevice || currentTrack.getSettings().deviceId === requestedDevice)) return this.camera!;
+    this.releaseCameraPreview();
+    this.camera = await navigator.mediaDevices.getUserMedia({
+      video: requestedDevice ? { deviceId: { exact: requestedDevice } } : true,
+      audio: false,
+    });
+    const track = this.camera.getVideoTracks()[0];
+    if (!track || track.readyState !== "live") throw new Error("The selected camera did not provide a live video track.");
+    return this.camera;
+  }
+
+  releaseCameraPreview(): void {
+    this.camera?.getTracks().forEach((track) => track.stop());
+    this.camera = undefined;
+  }
+
+  async prepare(mode: RecordingMode, microphone = true, microphoneDeviceId?: string, cameraDeviceId?: string): Promise<void> {
+    this.resetCapture(mode !== "screen");
     this.callbacks.onState("requesting");
     try {
       if (mode !== "camera") {
         this.screen = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
         this.screen.getVideoTracks()[0]?.addEventListener("ended", () => { if (this.recorders.length) void this.stop(); else this.dispose(); });
       }
-      if (mode !== "screen") this.camera = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      if (mode !== "screen") await this.prepareCameraPreview(cameraDeviceId);
       if (microphone) this.microphone = await navigator.mediaDevices.getUserMedia({ audio: microphoneDeviceId ? { deviceId: { exact: microphoneDeviceId } } : true, video: false });
       const microphoneTrack = this.microphone?.getAudioTracks()[0];
       if (microphone && (!microphoneTrack || microphoneTrack.readyState !== "live" || !microphoneTrack.enabled)) throw new Error("The selected microphone did not provide a live audio track.");
       await this.createExportAudioMix();
       this.project = createProject(mode);
       const screenTrack = this.screen?.getVideoTracks()[0];
-      const label = screenTrack?.label.toLowerCase() ?? "";
-      this.pointerMetadataAvailable = Boolean(screenTrack && (label.includes("studio recorder") || label.includes(location.host.toLowerCase())));
+      this.pointerMetadataAvailable = isStudioTabCapture(screenTrack);
       this.emitAudioStatus();
       this.callbacks.onState("ready");
     } catch (error) {
-      this.dispose();
+      this.resetCapture(mode !== "screen");
       const name = error instanceof DOMException ? error.name : "CaptureError";
       this.callbacks.onError(name === "NotAllowedError" ? "Permission was not granted. You can retry and choose a different source." : error instanceof Error ? error.message : "The selected source could not be opened.");
       throw error;
@@ -96,47 +115,55 @@ export class CaptureEngine {
       this.recorders.push(recorder);
       this.project.sources.push(descriptor);
     }
-    this.startedAt = performance.now();
     this.startPointerCapture();
     this.callbacks.onState("recording");
   }
 
   pause(): void {
     this.recorders.forEach((recorder) => recorder.state === "recording" && recorder.pause());
+    this.pointerCapture?.pause();
     this.callbacks.onState("paused");
   }
 
   resume(): void {
     this.recorders.forEach((recorder) => recorder.state === "paused" && recorder.resume());
+    this.pointerCapture?.resume();
     this.callbacks.onState("recording");
   }
 
   async stop(): Promise<StudioProject | undefined> {
-    this.stopPointerCapture();
+    const recordedDuration = this.stopPointerCapture();
     await Promise.all(this.recorders.map((recorder) => new Promise<void>((resolve) => {
       if (recorder.state === "inactive") return resolve();
       recorder.addEventListener("stop", () => resolve(), { once: true });
       recorder.stop();
     })));
     await Promise.all(this.pendingWrites);
-    if (this.project) {
-      this.project.duration = Math.max(0, (performance.now() - this.startedAt) / 1000);
-      this.project.zoomEvents = deriveZoomEvents(this.project.pointerEvents);
-      this.project.updatedAt = new Date().toISOString();
-      await this.store.putProject(this.project);
+    const completedProject = this.project;
+    if (completedProject) {
+      completedProject.duration = recordedDuration;
+      completedProject.zoomEvents = deriveZoomEvents(completedProject.pointerEvents);
+      completedProject.updatedAt = new Date().toISOString();
+      await this.store.putProject(completedProject);
     }
     this.dispose();
     this.callbacks.onState("stopped");
-    return this.project;
+    return completedProject;
   }
 
   dispose(): void {
+    this.resetCapture(false);
+  }
+
+  private resetCapture(preserveCamera: boolean): void {
     this.stopPointerCapture();
-    [this.screen, this.camera, this.microphone, this.exportAudio].forEach((stream) => stream?.getTracks().forEach((track) => track.stop()));
+    [this.screen, this.microphone, this.exportAudio].forEach((stream) => stream?.getTracks().forEach((track) => track.stop()));
+    if (!preserveCamera) this.releaseCameraPreview();
     void this.audioContext?.close();
-    this.screen = this.camera = this.microphone = this.exportAudio = undefined;
+    this.screen = this.microphone = this.exportAudio = undefined;
     this.audioContext = undefined;
     this.recorders = [];
+    this.project = undefined;
     this.callbacks.onAudioStatus?.({
       microphone: { available: false, enabled: false, readyState: "missing", label: "" },
       computerAudio: { available: false, enabled: false, readyState: "missing", label: "" },
@@ -170,23 +197,20 @@ export class CaptureEngine {
   }
 
   private startPointerCapture(): void {
-    if (!this.pointerMetadataAvailable || !this.project) return;
-    this.pointerListener = (event) => {
-      if (!this.project || document.visibilityState !== "visible") return;
-      this.project.pointerEvents.push({
-        id: crypto.randomUUID(),
-        time: Math.max(0, (performance.now() - this.startedAt) / 1000),
-        x: Math.min(1, Math.max(0, event.clientX / window.innerWidth)),
-        y: Math.min(1, Math.max(0, event.clientY / window.innerHeight)),
-        clickType: event.button === 2 ? "secondary" : "primary",
-        scope: "studio-ui",
-      });
-    };
-    window.addEventListener("pointerdown", this.pointerListener, { capture: true });
+    this.pointerCapture = new PointerCaptureSession({
+      target: window,
+      onCapture: (event) => {
+        if (!this.project || !this.pointerMetadataAvailable || document.visibilityState !== "visible") return;
+        this.project.pointerEvents.push(event);
+        this.callbacks.onPointerDiagnostic?.({ count: this.project.pointerEvents.length, time: event.time, x: event.x, y: event.y });
+      },
+    });
+    this.pointerCapture.start();
   }
 
-  private stopPointerCapture(): void {
-    if (this.pointerListener) window.removeEventListener("pointerdown", this.pointerListener, { capture: true });
-    this.pointerListener = undefined;
+  private stopPointerCapture(): number {
+    const elapsed = this.pointerCapture?.stop() ?? 0;
+    this.pointerCapture = undefined;
+    return elapsed;
   }
 }
