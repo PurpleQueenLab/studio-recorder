@@ -4,6 +4,17 @@ export type CursorStyle = "system" | "arrow" | "dot" | "large-dot" | "circle" | 
 export type AudioTrackType = "microphone" | "computer-audio" | "voiceover" | "music";
 export type BackgroundType = "color" | "gradient" | "wallpaper" | "image" | "blurred-source";
 export type PresentationFrame = "none" | "browser" | "macos" | "floating";
+export type CaptureResolution = "1080p" | "1440p" | "2160p";
+export type CaptureFrameRate = 30 | 60;
+export type CaptureQualityLevel = "optimized" | "high" | "maximum";
+
+export interface CaptureQuality {
+  resolution: CaptureResolution;
+  frameRate: CaptureFrameRate;
+  level: CaptureQualityLevel;
+  width: number;
+  height: number;
+}
 
 export interface NormalizedRect {
   x: number;
@@ -40,6 +51,9 @@ export interface ProjectSource {
   kind: "screen" | "camera" | "microphone" | "computer-audio" | "export-audio";
   chunkCount: number;
   mimeType: string;
+  width?: number;
+  height?: number;
+  frameRate?: number;
 }
 
 export interface ProjectAsset {
@@ -107,6 +121,7 @@ export interface StudioProject {
   updatedAt: string;
   duration: number;
   mode: RecordingMode;
+  quality: CaptureQuality;
   sources: ProjectSource[];
   crop: NormalizedRect;
   camera: { visible: boolean; shape: CameraShape; rect: NormalizedRect };

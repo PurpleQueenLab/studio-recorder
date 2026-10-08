@@ -111,6 +111,10 @@ export function isStudioTabCapture(track?: MediaStreamTrack, expectedOrigin = lo
   const captureTrack = track as MediaStreamTrack & { getCaptureHandle?: () => { handle?: string; origin?: string } | null };
   const captureHandle = captureTrack.getCaptureHandle?.();
   if (captureHandle?.handle === STUDIO_CAPTURE_HANDLE && (!captureHandle.origin || captureHandle.origin === expectedOrigin)) return true;
+  // Browsers intentionally hide the selected tab URL when Capture Handle is unavailable.
+  // A browser-surface track is the strongest remaining signal and enables the observable
+  // same-page pointer path; window and monitor captures remain manual-only.
+  if (track.getSettings?.().displaySurface === "browser") return true;
   const label = track.label.toLocaleLowerCase();
   return label.includes("studio recorder") || label.includes(currentTitle.toLocaleLowerCase());
 }

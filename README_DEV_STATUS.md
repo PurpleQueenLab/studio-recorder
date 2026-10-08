@@ -112,3 +112,38 @@ Environment limitation:
 5. Add and resize a zoom event, drag/resize the camera, and exercise each presentation/background option.
 6. Export MP4 and confirm local playback, H.264 + AAC-LC, stereo audio, expected dimensions, and audio/video duration alignment.
 7. Upload that exported file to any required third-party playback target separately; native validation alone is not evidence of that service’s playback compatibility.
+
+## PRE-PRODUCTION ACCEPTANCE — 8 October 2026
+
+### PASSED
+
+- Capture setup defaults to 1080p, 30 FPS, High. Higher resolution and 60 FPS choices remain hidden until the active media track reports enough width, height, and frame-rate capability.
+- Camera capture requests bounded ideal resolution and frame-rate constraints for the selected profile. Recorded project metadata stores the actual track dimensions and frame rate.
+- Capture and H.264 export use explicit profile/resolution/frame-rate bitrate targets. Export dimensions are clamped to the recorded primary source, so a smaller source is not upscaled and labelled 1440p or 4K.
+- Circle and square camera overlays use true 1:1 pixel geometry. Preview and export use cover-cropping rather than stretching the camera image; rounded rectangles retain their configured aspect ratio.
+- Crop guides are editor-only, visible only while the Crop tool is active and playback is paused; export never draws them.
+- Same-page pointer events persist active recording time and normalized focal coordinates, generate automatic ZoomEvents, and use the same eased pan/scale transform as manual zooms. Browser-tab surfaces now provide a fallback when Capture Handle metadata is unavailable.
+- Library search, type/date filters, and sort feed pagination. Pagination shows three responsive grid rows per page, clamps invalid pages, and filter changes return to page 1.
+- Primary actions and selected states resolve through one semantic `--primary` purple token in dark and light themes.
+- Screen, screen + camera, and camera-only source selection remain represented by the shared primary-video rule.
+- MP4 compatibility invariants remain H.264 video plus at most one AAC 48 kHz stereo mix, with post-export decode and metadata validation.
+
+### PARTIAL
+
+- Automated tests cover the same-page click lifecycle and resulting automatic ZoomEvents, including a browser-tab fallback. The native Chrome share-this-tab chooser has not been completed in this automated environment, so automatic zoom is not marked as manually accepted.
+- The capability UI is intentionally conservative before permission. The tested MacBook camera reported and delivered 1920 × 1080 at 30 FPS; it did not expose 60 FPS, 1440p, or 4K, so those choices remained unavailable. Display-source limits still require a native share-source acceptance run.
+- Built-in music remains optional future work. Local audio import and non-destructive editor music mixing are preserved.
+
+### KNOWN BROWSER LIMITATIONS
+
+- Browser APIs do not expose global operating-system click coordinates for arbitrary application windows or full-display capture. Those sources retain manual zoom.
+- Native screen-share, camera permission, and save dialogs require user interaction and cannot be completed by the in-app browser automation.
+- Some browsers omit detailed `MediaTrackCapabilities`; Studio Recorder then offers only the conservative 1080p/30 baseline instead of guessing.
+
+### MANUAL TEST RESULTS
+
+- Pending on a physical Chrome/Edge session: share this Studio Recorder tab, record spaced and rapid clicks, pause/resume, and confirm generated automatic events and focal positions in the Zoom timeline.
+- Passed on the physical MacBook camera in the in-app Chromium browser: live preview, microphone acquisition, camera-only recording, editor load, and actual 1920 × 1080 capture. Only 1080p/30 was exposed; 60 FPS, 1440p, and 4K were not supported by that tested camera/browser path.
+- Passed in browser: MP4 self-check validated AVC + AAC at 48 kHz stereo with no console warnings or errors.
+- Passed in browser: library search, camera/screen type filtering, date selection, and sort selection against a real locally recorded camera project. Multi-page behavior is covered by automated pagination tests; the live browser did not contain enough projects to render a second page.
+- Pending native export acceptance: save a representative project at each exposed profile and inspect playback, codec layout, dimensions, duration, and A/V alignment.

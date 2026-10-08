@@ -26,3 +26,10 @@ export function filterAndSortProjects(projects: StudioProject[], query: string, 
 export function recordingModeLabel(mode: RecordingMode): string {
   return mode === "screen" ? "Screen" : mode === "screen-camera" ? "Screen + Camera" : "Camera";
 }
+
+export function paginateItems<T>(items: T[], page: number, columns: number, rows = 3): { items: T[]; page: number; pageCount: number; pageSize: number } {
+  const pageSize = Math.max(1, Math.floor(columns)) * Math.max(1, Math.floor(rows));
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(pageCount, Math.max(1, Math.floor(page)));
+  return { items: items.slice((safePage - 1) * pageSize, safePage * pageSize), page: safePage, pageCount, pageSize };
+}

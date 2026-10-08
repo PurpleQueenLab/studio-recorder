@@ -6,8 +6,9 @@ import { Camera01Icon, ComputerIcon, Mic01Icon, PauseIcon, PlayIcon, RecordIcon,
 import { CaptureEngine } from "@/lib/media/capture-engine";
 import type { CaptureAudioStatus } from "@/lib/media/capture-engine";
 import { configureStudioCaptureHandle } from "@/lib/media/pointer-capture";
+import { DEFAULT_CAPTURE_QUALITY, qualityLabel, RESOLUTION_PRESETS, type QualitySupport } from "@/lib/media/quality";
 import { LocalProjectStore } from "@/lib/storage/project-store";
-import type { RecordingMode } from "@/types/project";
+import type { CaptureFrameRate, CaptureQuality, CaptureQualityLevel, CaptureResolution, RecordingMode } from "@/types/project";
 import type { StudioProject } from "@/types/project";
 
 type Status = "idle" | "requesting" | "ready" | "recording" | "paused" | "stopped";
@@ -25,6 +26,9 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
   const [cameraId, setCameraId] = useState("");
   const [cameraPreviewState, setCameraPreviewState] = useState<CameraPreviewState>("not-requested");
   const [pointerDiagnostic, setPointerDiagnostic] = useState<{ count: number; time: number; x: number; y: number }>();
+  const [quality, setQuality] = useState<CaptureQuality>({ ...DEFAULT_CAPTURE_QUALITY });
+  const [qualityOpen, setQualityOpen] = useState(false);
+  const [qualitySupport, setQualitySupport] = useState<QualitySupport>({ resolutions: ["1080p"], frameRates: [30], verified: false });
   const previewRef = useRef<HTMLVideoElement>(null);
   const cameraRef = useRef<HTMLVideoElement>(null);
   const [engine] = useState(() => new CaptureEngine(new LocalProjectStore(), {
@@ -60,12 +64,13 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
     if (targetMode === "screen") return;
     setCameraPreviewState("loading"); setError("");
     try {
-      const stream = await engine.prepareCameraPreview(deviceId || undefined);
+      const stream = await engine.prepareCameraPreview(deviceId || undefined, quality);
       const track = stream.getVideoTracks()[0];
       track.addEventListener("ended", () => setCameraPreviewState("disconnected"), { once: true });
       if (targetMode === "camera" && previewRef.current) previewRef.current.srcObject = stream;
       if (targetMode === "screen-camera" && cameraRef.current) cameraRef.current.srcObject = stream;
       setCameraPreviewState("ready");
+      setQualitySupport(engine.qualitySupport);
       await refreshDevices();
     } catch (reason) {
       const denied = reason instanceof DOMException && reason.name === "NotAllowedError";
@@ -76,8 +81,19 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
 
   function selectMode(value: RecordingMode) {
     setMode(value); setError("");
-    if (value === "screen") { engine.releaseCameraPreview(); setCameraPreviewState("not-requested"); if (previewRef.current) previewRef.current.srcObject = null; }
+    if (value === "screen") { engine.releaseCameraPreview(); setCameraPreviewState("not-requested"); setQualitySupport({ resolutions: ["1080p"], frameRates: [30], verified: false }); setQuality({ ...DEFAULT_CAPTURE_QUALITY }); if (previewRef.current) previewRef.current.srcObject = null; }
     else void requestCameraPreview(value);
+  }
+
+  async function updateQuality(next: CaptureQuality) {
+    if (status === "ready") {
+      const actual = await engine.updateQuality(next);
+      setQuality(actual);
+      setQualitySupport(engine.qualitySupport);
+    } else {
+      setQuality(next);
+      if (cameraPreviewState === "ready") await engine.prepareCameraPreview(cameraId || undefined, next);
+    }
   }
 
   async function prepare() {
@@ -85,7 +101,9 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
     setPointerDiagnostic(undefined);
     setElapsed(0);
     try {
-      await engine.prepare(mode, true, microphoneId || undefined, cameraId || undefined);
+      await engine.prepare(mode, true, microphoneId || undefined, cameraId || undefined, quality);
+      setQuality(engine.activeQuality);
+      setQualitySupport(engine.qualitySupport);
       await refreshDevices();
       if (previewRef.current) previewRef.current.srcObject = engine.streams.screen ?? engine.streams.camera ?? null;
       if (cameraRef.current) cameraRef.current.srcObject = engine.streams.camera ?? null;
@@ -130,7 +148,8 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
         {status === "ready" && mode !== "camera" && !audioStatus?.computerAudio.available ? <p className="source-warning">The browser did not provide a system-audio track. Microphone narration will still be recorded.</p> : null}
         {status === "ready" ? <p className="source-diagnostic">{audioStatus?.pointerMetadata ? "Automatic click zoom is available for this Studio Recorder tab capture." : "This source does not expose reliable click coordinates; manual zoom remains available."}</p> : null}
         {process.env.NODE_ENV === "development" && pointerDiagnostic ? <p className="source-diagnostic" aria-live="polite">Captured click {pointerDiagnostic.count}: {formatDiagnosticTime(pointerDiagnostic.time)} · x {pointerDiagnostic.x.toFixed(2)} · y {pointerDiagnostic.y.toFixed(2)}</p> : null}
-        <div className="quality-row"><span><small>Quality</small><strong>1080p · 30 FPS</strong></span><button type="button">Change</button></div>
+        <div className="quality-row"><span><small>Quality</small><strong>{qualityLabel(quality)}</strong></span><button type="button" aria-expanded={qualityOpen} onClick={() => setQualityOpen((value) => !value)} disabled={status === "requesting" || status === "recording" || status === "paused"}>{qualityOpen ? "Done" : "Change"}</button></div>
+        {qualityOpen ? <QualityChooser quality={quality} support={qualitySupport} onChange={(next) => void updateQuality(next)} /> : null}
         {error && <p className="error-message" role="alert">{error}</p>}
         {status === "idle" || status === "stopped" ? <button className="primary wide" onClick={prepare}>Choose sources</button> : status === "requesting" ? <button className="primary wide" disabled>Waiting for browser permission…</button> : status === "ready" ? <button className="primary wide" onClick={() => engine.start()}>Start recording</button> : <div className="record-actions">
           <button className="secondary" aria-label={status === "paused" ? "Resume" : "Pause"} onClick={() => status === "paused" ? engine.resume() : engine.pause()}><HugeiconsIcon icon={status === "paused" ? PlayIcon : PauseIcon} size={18} /></button>
@@ -140,6 +159,16 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
       </aside>
     </div>
   </section>;
+}
+
+function QualityChooser({ quality, support, onChange }: { quality: CaptureQuality; support: QualitySupport; onChange: (quality: CaptureQuality) => void }) {
+  const setResolution = (resolution: CaptureResolution) => onChange({ ...quality, resolution, ...RESOLUTION_PRESETS[resolution] });
+  return <fieldset className="quality-chooser"><legend>Capture quality</legend>
+    <label>Resolution<select aria-label="Capture resolution" value={quality.resolution} onChange={(event) => setResolution(event.target.value as CaptureResolution)}>{support.resolutions.map((resolution) => <option key={resolution} value={resolution}>{RESOLUTION_PRESETS[resolution].label}</option>)}</select></label>
+    <label>Frame rate<select aria-label="Capture frame rate" value={quality.frameRate} onChange={(event) => onChange({ ...quality, frameRate: Number(event.target.value) as CaptureFrameRate })}>{support.frameRates.map((frameRate) => <option key={frameRate} value={frameRate}>{frameRate} FPS</option>)}</select></label>
+    <label>Profile<select aria-label="Capture quality profile" value={quality.level} onChange={(event) => onChange({ ...quality, level: event.target.value as CaptureQualityLevel })}><option value="optimized">Optimized</option><option value="high">High</option><option value="maximum">Maximum</option></select></label>
+    <small>{support.verified ? "Options reflect the active device/source capabilities." : "Higher modes appear only after this browser verifies the active source."}</small>
+  </fieldset>;
 }
 
 function formatDiagnosticTime(seconds: number): string {

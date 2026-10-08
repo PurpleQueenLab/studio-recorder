@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { previewPointFromSource, sourcePointFromPreview, zoomSourceRect, zoomTransformAt } from "@/lib/editor/composition";
+import { cameraPixelRect, coverSourceRect } from "@/lib/editor/camera-geometry";
 import { adjustAudioClip, adjustZoomEvent, clampTimelineTime, timelineTimeFromPosition } from "@/lib/editor/timeline";
 import { clipGainAt, duckingMultiplier, outputDuration, trackFadeAt, trackIsAudible, visibleTimelineSegments } from "@/lib/media/audio-mixer";
 import { createProject, deriveZoomEvents, normalizeProject } from "@/lib/project";
@@ -115,5 +116,26 @@ describe("MP4 metadata regression", () => {
     const source = readFileSync(new URL("../features/export/mp4-export-engine.ts", import.meta.url), "utf8");
     expect(source).toContain("output.setMetadataTags");
     expect(source).not.toMatch(/new Conversion\s*\(\s*\{[^}]*\btags\s*:/s);
+  });
+
+  it("keeps crop guides out of playback and uses one primary theme token", () => {
+    const editor = readFileSync(new URL("../features/editor/editor-view.tsx", import.meta.url), "utf8");
+    const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+    expect(editor).toContain('tool === "crop" && !playing ? <CropOverlay');
+    expect(css).toContain("--bg-selected: var(--primary)");
+    expect(css).toContain("--accent: var(--primary)");
+  });
+});
+
+describe("camera bubble geometry", () => {
+  it("uses true 1:1 pixels for circle and square shapes", () => {
+    const rect = { x: .75, y: .7, width: .2, height: .2 };
+    expect(cameraPixelRect(rect, "circle", 1920, 1080)).toMatchObject({ width: 384, height: 384 });
+    expect(cameraPixelRect(rect, "square", 1080, 1920)).toMatchObject({ width: 216, height: 216 });
+    expect(cameraPixelRect(rect, "rounded", 1920, 1080)).toMatchObject({ width: 384, height: 216 });
+  });
+
+  it("centre-crops camera video instead of stretching faces", () => {
+    expect(coverSourceRect(1920, 1080, 300, 300)).toEqual({ x: 420, y: 0, width: 1080, height: 1080 });
   });
 });

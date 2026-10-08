@@ -1,7 +1,8 @@
 import { LocalProjectStore } from "@/lib/storage/project-store";
 import { createProject, deriveZoomEvents } from "@/lib/project";
 import { isStudioTabCapture, PointerCaptureSession } from "@/lib/media/pointer-capture";
-import type { RecordingMode, StudioProject } from "@/types/project";
+import { captureVideoBitrate, DEFAULT_CAPTURE_QUALITY, resolveActualQuality, supportFromTrack, videoConstraints } from "@/lib/media/quality";
+import type { CaptureQuality, ProjectSource, RecordingMode, StudioProject } from "@/types/project";
 
 export type CaptureAudioStatus = {
   microphone: { available: boolean; enabled: boolean; readyState: MediaStreamTrackState | "missing"; label: string };
@@ -27,6 +28,7 @@ export class CaptureEngine {
   private project?: StudioProject;
   private pointerCapture?: PointerCaptureSession;
   private pointerMetadataAvailable = false;
+  private selectedQuality: CaptureQuality = { ...DEFAULT_CAPTURE_QUALITY };
 
   constructor(private store: LocalProjectStore, private callbacks: CaptureCallbacks) {}
 
@@ -34,13 +36,16 @@ export class CaptureEngine {
     return { screen: this.screen, camera: this.camera, microphone: this.microphone };
   }
 
-  async prepareCameraPreview(cameraDeviceId?: string): Promise<MediaStream> {
+  async prepareCameraPreview(cameraDeviceId?: string, quality = this.selectedQuality): Promise<MediaStream> {
     const currentTrack = this.camera?.getVideoTracks()[0];
     const requestedDevice = cameraDeviceId || undefined;
-    if (currentTrack?.readyState === "live" && (!requestedDevice || currentTrack.getSettings().deviceId === requestedDevice)) return this.camera!;
+    if (currentTrack?.readyState === "live" && (!requestedDevice || currentTrack.getSettings().deviceId === requestedDevice)) {
+      await currentTrack.applyConstraints(videoConstraints(quality)).catch(() => undefined);
+      return this.camera!;
+    }
     this.releaseCameraPreview();
     this.camera = await navigator.mediaDevices.getUserMedia({
-      video: requestedDevice ? { deviceId: { exact: requestedDevice } } : true,
+      video: videoConstraints(quality, requestedDevice),
       audio: false,
     });
     const track = this.camera.getVideoTracks()[0];
@@ -48,25 +53,47 @@ export class CaptureEngine {
     return this.camera;
   }
 
+  get qualitySupport() {
+    return supportFromTrack(this.screen?.getVideoTracks()[0] ?? this.camera?.getVideoTracks()[0]);
+  }
+
+  get activeQuality() {
+    return this.project?.quality ?? this.selectedQuality;
+  }
+
+  async updateQuality(quality: CaptureQuality): Promise<CaptureQuality> {
+    this.selectedQuality = { ...quality };
+    const primary = this.project?.mode === "camera" ? this.camera?.getVideoTracks()[0] : this.screen?.getVideoTracks()[0];
+    await primary?.applyConstraints(videoConstraints(quality)).catch(() => undefined);
+    const cameraTrack = this.camera?.getVideoTracks()[0];
+    if (cameraTrack && cameraTrack !== primary) await cameraTrack.applyConstraints(videoConstraints(quality)).catch(() => undefined);
+    const actual = resolveActualQuality(quality, primary ?? cameraTrack);
+    if (this.project) this.project.quality = actual;
+    return actual;
+  }
+
   releaseCameraPreview(): void {
     this.camera?.getTracks().forEach((track) => track.stop());
     this.camera = undefined;
   }
 
-  async prepare(mode: RecordingMode, microphone = true, microphoneDeviceId?: string, cameraDeviceId?: string): Promise<void> {
+  async prepare(mode: RecordingMode, microphone = true, microphoneDeviceId?: string, cameraDeviceId?: string, quality = DEFAULT_CAPTURE_QUALITY): Promise<void> {
+    this.selectedQuality = { ...quality };
     this.resetCapture(mode !== "screen");
     this.callbacks.onState("requesting");
     try {
       if (mode !== "camera") {
-        this.screen = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        this.screen = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: quality.frameRate, max: quality.frameRate } }, audio: true });
+        await this.screen.getVideoTracks()[0]?.applyConstraints(videoConstraints(quality)).catch(() => undefined);
         this.screen.getVideoTracks()[0]?.addEventListener("ended", () => { if (this.recorders.length) void this.stop(); else this.dispose(); });
       }
-      if (mode !== "screen") await this.prepareCameraPreview(cameraDeviceId);
+      if (mode !== "screen") await this.prepareCameraPreview(cameraDeviceId, quality);
       if (microphone) this.microphone = await navigator.mediaDevices.getUserMedia({ audio: microphoneDeviceId ? { deviceId: { exact: microphoneDeviceId } } : true, video: false });
       const microphoneTrack = this.microphone?.getAudioTracks()[0];
       if (microphone && (!microphoneTrack || microphoneTrack.readyState !== "live" || !microphoneTrack.enabled)) throw new Error("The selected microphone did not provide a live audio track.");
       await this.createExportAudioMix();
       this.project = createProject(mode);
+      this.project.quality = resolveActualQuality(quality, mode === "camera" ? this.camera?.getVideoTracks()[0] : this.screen?.getVideoTracks()[0]);
       const screenTrack = this.screen?.getVideoTracks()[0];
       this.pointerMetadataAvailable = isStudioTabCapture(screenTrack);
       this.emitAudioStatus();
@@ -100,11 +127,12 @@ export class CaptureEngine {
       const mimeType = mimeTypes
         .find((value) => MediaRecorder.isTypeSupported(value));
       const recorderOptions: MediaRecorderOptions = mimeType ? { mimeType } : {};
-      if (stream.getVideoTracks().length) recorderOptions.videoBitsPerSecond = 8_000_000;
+      if (stream.getVideoTracks().length) recorderOptions.videoBitsPerSecond = captureVideoBitrate(this.project.quality);
       else recorderOptions.audioBitsPerSecond = 192_000;
       const recorder = new MediaRecorder(stream, recorderOptions);
       let index = 0;
-      const descriptor = { kind: source, chunkCount: 0, mimeType: recorder.mimeType };
+      const videoSettings = stream.getVideoTracks()[0]?.getSettings();
+      const descriptor: ProjectSource = { kind: source, chunkCount: 0, mimeType: recorder.mimeType, width: videoSettings?.width, height: videoSettings?.height, frameRate: videoSettings?.frameRate };
       recorder.ondataavailable = (event) => {
         if (event.data.size) {
           this.pendingWrites.push(this.store.putChunk(this.project!.id, source, index++, event.data));
@@ -200,7 +228,7 @@ export class CaptureEngine {
     this.pointerCapture = new PointerCaptureSession({
       target: window,
       onCapture: (event) => {
-        if (!this.project || !this.pointerMetadataAvailable || document.visibilityState !== "visible") return;
+        if (!this.project || !this.pointerMetadataAvailable) return;
         this.project.pointerEvents.push(event);
         this.callbacks.onPointerDiagnostic?.({ count: this.project.pointerEvents.length, time: event.time, x: event.x, y: event.y });
       },

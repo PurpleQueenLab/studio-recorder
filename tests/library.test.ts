@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterAndSortProjects, recordingModeLabel } from "@/lib/library";
+import { filterAndSortProjects, paginateItems, recordingModeLabel } from "@/lib/library";
 import { createProject } from "@/lib/project";
 
 function project(title: string, mode: "screen" | "screen-camera" | "camera", createdAt: string, duration: number) {
@@ -30,5 +30,12 @@ describe("recording library controls", () => {
   it("uses clear human-readable mode labels", () => {
     expect(recordingModeLabel("screen-camera")).toBe("Screen + Camera");
     expect(recordingModeLabel("camera")).toBe("Camera");
+  });
+
+  it("paginates exactly three responsive grid rows", () => {
+    const items = Array.from({ length: 14 }, (_, index) => index + 1);
+    expect(paginateItems(items, 1, 4)).toMatchObject({ items: items.slice(0, 12), pageSize: 12, pageCount: 2 });
+    expect(paginateItems(items, 2, 2)).toMatchObject({ items: [7, 8, 9, 10, 11, 12], pageSize: 6, pageCount: 3 });
+    expect(paginateItems(items, 99, 4)).toMatchObject({ items: [13, 14], page: 2 });
   });
 });

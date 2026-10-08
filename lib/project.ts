@@ -1,4 +1,5 @@
 import type { AudioProjectState, AudioTrackType, NormalizedRect, PointerEventMetadata, RecordingMode, StudioProject, ZoomEvent } from "@/types/project";
+import { DEFAULT_CAPTURE_QUALITY } from "@/lib/media/quality";
 
 export const FULL_FRAME: NormalizedRect = { x: 0, y: 0, width: 1, height: 1 };
 
@@ -103,9 +104,10 @@ export function createProject(mode: RecordingMode, now = new Date()): StudioProj
     updatedAt: stamp,
     duration: 0,
     mode,
+    quality: { ...DEFAULT_CAPTURE_QUALITY },
     sources: [],
     crop: FULL_FRAME,
-    camera: { visible: mode !== "screen", shape: "circle", rect: { x: 0.76, y: 0.68, width: 0.2, height: 0.27 } },
+    camera: { visible: mode !== "screen", shape: "circle", rect: { x: 0.76, y: 0.62, width: 0.2, height: 0.356 } },
     zoomEvents: [],
     pointerEvents: [],
     cursor: { style: "system", size: 1, opacity: 1, shadow: true, smoothing: 0.65, clickEffect: "pulse" },
@@ -123,8 +125,9 @@ export function normalizeProject(project: StudioProject): StudioProject {
   const audioDefaults = createDefaultAudioState();
   return {
     ...project,
+    quality: project.quality ?? { ...DEFAULT_CAPTURE_QUALITY },
     crop: project.crop ?? FULL_FRAME,
-    camera: project.camera ?? { visible: project.mode !== "screen", shape: "circle", rect: { x: .76, y: .68, width: .2, height: .27 } },
+    camera: project.camera ?? { visible: project.mode !== "screen", shape: "circle", rect: { x: .76, y: .62, width: .2, height: .356 } },
     zoomEvents: (project.zoomEvents ?? []).map((event) => ({ enabled: true, source: "manual", ...event })),
     pointerEvents: (project.pointerEvents ?? []).map((event) => ({
       ...event,

@@ -21,6 +21,11 @@ describe("same-page pointer capture session", () => {
     expect(isStudioTabCapture(track, "https://another.example", "Record — Studio Recorder")).toBe(false);
   });
 
+  it("enables observable clicks for a browser-tab surface when Capture Handle is hidden", () => {
+    const track = { label: "Current Tab", getSettings: () => ({ displaySurface: "browser" }) } as unknown as MediaStreamTrack;
+    expect(isStudioTabCapture(track, "http://localhost:3000", "Studio Recorder")).toBe(true);
+  });
+
   it("stores normalized active-timeline clicks, excludes pause, resumes, and generates focal zooms", () => {
     const target = new FakePointerTarget();
     const captured: PointerEventMetadata[] = [];

@@ -17,7 +17,9 @@ import {
 import { LocalProjectStore } from "@/lib/storage/project-store";
 import { editedTimestamp, formatExportFallback, primaryVideoSourceKind, sanitizeFilename } from "@/lib/project";
 import { previewPointFromSource, zoomSourceRect, zoomTransformAt } from "@/lib/editor/composition";
+import { cameraPixelRect, coverSourceRect } from "@/lib/editor/camera-geometry";
 import { renderProjectAudioMix } from "@/lib/media/audio-mixer";
+import { exportVideoBitrate, RESOLUTION_PRESETS } from "@/lib/media/quality";
 import type { StudioProject } from "@/types/project";
 
 export type ExportStage = "Preparing video" | "Rendering" | "Encoding audio" | "Finalizing MP4";
@@ -106,7 +108,7 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
   const output = new Output({ format, target });
   output.setMetadataTags({ title: project.title });
   const videoInput = new Input({ formats: ALL_FORMATS, source: new BlobSource(videoBlob) });
-  const outputSize = outputDimensions(project.canvas.aspectRatio);
+  const outputSize = outputDimensions(project);
   let cameraSink: VideoSampleSink | undefined;
   if (cameraBlob) {
     const cameraInput = new Input({ formats: ALL_FORMATS, source: new BlobSource(cameraBlob) });
@@ -126,8 +128,8 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
     trim,
     video: {
       codec: "avc",
-      quality: new Quality("high"),
-      frameRate: 30,
+      quality: new Quality({ bitrate: exportVideoBitrate(project.quality.resolution, project.quality.frameRate, project.quality.level), bitrateMode: "variable" }),
+      frameRate: project.quality.frameRate,
       keyFrameInterval: 2,
       forceTranscode: true,
       processedWidth: outputSize.width,
@@ -178,11 +180,19 @@ async function sourceBlob(store: LocalProjectStore, project: StudioProject, kind
   return chunks.length ? new Blob(chunks, { type: descriptor.mimeType }) : null;
 }
 
-function outputDimensions(aspectRatio: StudioProject["canvas"]["aspectRatio"]) {
-  if (aspectRatio === "9:16") return { width: 1080, height: 1920 };
-  if (aspectRatio === "1:1") return { width: 1080, height: 1080 };
-  if (aspectRatio === "4:5") return { width: 1080, height: 1350 };
-  return { width: 1920, height: 1080 };
+export function outputDimensions(project: StudioProject) {
+  const preset = RESOLUTION_PRESETS[project.quality.resolution];
+  const aspectRatio = project.canvas.aspectRatio;
+  let target = aspectRatio === "9:16" ? { width: preset.height, height: preset.width }
+    : aspectRatio === "1:1" ? { width: preset.height, height: preset.height }
+      : aspectRatio === "4:5" ? { width: preset.height, height: preset.height * 1.25 }
+        : { width: preset.width, height: preset.height };
+  const source = project.sources.find((item) => item.kind === primaryVideoSourceKind(project.mode));
+  const sourceWidth = source?.width ?? project.quality.width;
+  const sourceHeight = source?.height ?? project.quality.height;
+  const scale = Math.min(1, sourceWidth / target.width, sourceHeight / target.height);
+  target = { width: even(target.width * scale), height: even(target.height * scale) };
+  return target;
 }
 
 function createCompositor(project: StudioProject, width: number, height: number, cameraSink?: VideoSampleSink, backgroundBitmap?: ImageBitmap) {
@@ -264,30 +274,30 @@ function drawCursor(context: OffscreenCanvasRenderingContext2D, x: number, y: nu
 }
 
 function drawCameraBubble(context: OffscreenCanvasRenderingContext2D, sample: VideoSample, width: number, height: number, project: StudioProject) {
-  const rect = project.camera.rect;
-  const x = rect.x * width;
-  const y = rect.y * height;
-  const bubbleWidth = rect.width * width;
-  const bubbleHeight = rect.height * height;
+  const rect = cameraPixelRect(project.camera.rect, project.camera.shape, width, height);
+  const { x, y, width: bubbleWidth, height: bubbleHeight } = rect;
+  const source = coverSourceRect(sample.displayWidth, sample.displayHeight, bubbleWidth, bubbleHeight);
   context.save();
   context.beginPath();
-  if (project.camera.shape === "circle") context.ellipse(x + bubbleWidth / 2, y + bubbleHeight / 2, bubbleWidth / 2, bubbleHeight / 2, 0, 0, Math.PI * 2);
+  if (project.camera.shape === "circle") context.arc(x + bubbleWidth / 2, y + bubbleHeight / 2, bubbleWidth / 2, 0, Math.PI * 2);
   else context.roundRect(x, y, bubbleWidth, bubbleHeight, project.camera.shape === "rounded" ? Math.min(bubbleWidth, bubbleHeight) * .12 : 0);
   context.clip();
-  sample.draw(context, 0, 0, sample.displayWidth, sample.displayHeight, x, y, bubbleWidth, bubbleHeight);
+  sample.draw(context, source.x, source.y, source.width, source.height, x, y, bubbleWidth, bubbleHeight);
   context.restore();
   context.save();
   context.strokeStyle = "rgba(255,255,255,.9)";
   context.lineWidth = Math.max(2, width / 640);
   if (project.camera.shape === "circle") {
     context.beginPath();
-    context.ellipse(x + bubbleWidth / 2, y + bubbleHeight / 2, bubbleWidth / 2, bubbleHeight / 2, 0, 0, Math.PI * 2);
+    context.arc(x + bubbleWidth / 2, y + bubbleHeight / 2, bubbleWidth / 2, 0, Math.PI * 2);
     context.stroke();
   } else {
     context.strokeRect(x, y, bubbleWidth, bubbleHeight);
   }
   context.restore();
 }
+
+const even = (value: number) => Math.max(2, Math.floor(value / 2) * 2);
 
 export async function validateCompatibleMp4(blob: Blob, filename: string, expectAudio = false, expectedSize?: { width: number; height: number }): Promise<ExportReceipt> {
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(blob) });
