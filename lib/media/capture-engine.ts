@@ -11,7 +11,7 @@ export type CaptureAudioStatus = {
 };
 
 type CaptureCallbacks = {
-  onState: (state: "requesting" | "ready" | "recording" | "paused" | "stopped") => void;
+  onState: (state: "requesting" | "ready" | "recording" | "paused" | "saving" | "stopped") => void;
   onError: (message: string) => void;
   onAudioStatus?: (status: CaptureAudioStatus) => void;
   onPointerDiagnostic?: (event: { count: number; time: number; x: number; y: number }) => void;
@@ -25,6 +25,7 @@ export class CaptureEngine {
   private audioContext?: AudioContext;
   private recorders: MediaRecorder[] = [];
   private pendingWrites: Promise<void>[] = [];
+  private pendingWriteError?: unknown;
   private project?: StudioProject;
   private pointerCapture?: PointerCaptureSession;
   private pointerMetadataAvailable = false;
@@ -108,9 +109,9 @@ export class CaptureEngine {
 
   async start(): Promise<void> {
     if (!this.project) throw new Error("Prepare the recording before starting.");
-    await this.store.putProject(this.project);
     this.recorders = [];
     this.pendingWrites = [];
+    this.pendingWriteError = undefined;
     await this.audioContext?.resume();
     const sources: Array<[StudioProject["sources"][number]["kind"], MediaStream | undefined]> = [
       ["screen", this.screen && new MediaStream(this.screen.getVideoTracks())],
@@ -135,7 +136,10 @@ export class CaptureEngine {
       const descriptor: ProjectSource = { kind: source, chunkCount: 0, mimeType: recorder.mimeType, width: videoSettings?.width, height: videoSettings?.height, frameRate: videoSettings?.frameRate };
       recorder.ondataavailable = (event) => {
         if (event.data.size) {
-          this.pendingWrites.push(this.store.putChunk(this.project!.id, source, index++, event.data));
+          const write = this.store.putChunk(this.project!.id, source, index++, event.data).catch((error) => {
+            this.pendingWriteError ??= error;
+          });
+          this.pendingWrites.push(write);
           descriptor.chunkCount = index;
         }
       };
@@ -161,24 +165,39 @@ export class CaptureEngine {
 
   async stop(): Promise<StudioProject | undefined> {
     const recordedDuration = this.stopPointerCapture();
-    await Promise.all(this.recorders.map((recorder) => new Promise<void>((resolve) => {
-      if (recorder.state === "inactive") return resolve();
-      recorder.addEventListener("stop", () => resolve(), { once: true });
-      recorder.stop();
-    })));
-    await Promise.all(this.pendingWrites);
-    const completedProject = this.project;
-    if (completedProject) {
+    this.callbacks.onState("saving");
+    try {
+      await Promise.all(this.recorders.map((recorder) => new Promise<void>((resolve) => {
+        if (recorder.state === "inactive") return resolve();
+        recorder.addEventListener("stop", () => resolve(), { once: true });
+        recorder.stop();
+      })));
+      await Promise.all(this.pendingWrites);
+      if (this.pendingWriteError) throw this.pendingWriteError;
+      const completedProject = this.project;
+      if (!completedProject) return undefined;
       completedProject.duration = recordedDuration;
       const videoKind = primaryVideoSourceKind(completedProject.mode);
       completedProject.videoClips = [{ id: crypto.randomUUID(), sourceId: videoKind, name: completedProject.title, timelineStart: 0, sourceIn: 0, sourceOut: recordedDuration }];
       completedProject.zoomEvents = deriveZoomEvents(completedProject.pointerEvents);
       completedProject.updatedAt = new Date().toISOString();
+      await this.store.validatePrimaryMedia(completedProject, videoKind);
       await this.store.putProject(completedProject);
+      const persisted = await this.store.getProject(completedProject.id);
+      if (!persisted) throw new Error("The recording metadata could not be read back from browser storage.");
+      await this.store.validatePrimaryMedia(persisted, videoKind);
+      return persisted;
+    } catch (error) {
+      const quota = error instanceof DOMException && (error.name === "QuotaExceededError" || error.name === "NS_ERROR_DOM_QUOTA_REACHED");
+      const message = quota
+        ? "Browser storage is full. The recording could not be saved locally. Free storage space and try again."
+        : error instanceof Error ? `The recording could not be saved locally: ${error.message}` : "The recording could not be saved locally.";
+      this.callbacks.onError(message);
+      throw new Error(message, { cause: error });
+    } finally {
+      this.dispose();
+      this.callbacks.onState("stopped");
     }
-    this.dispose();
-    this.callbacks.onState("stopped");
-    return completedProject;
   }
 
   dispose(): void {

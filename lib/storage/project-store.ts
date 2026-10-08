@@ -11,6 +11,14 @@ function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
+function transactionComplete(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB transaction was aborted"));
+  });
+}
+
 export class LocalProjectStore {
   private db?: IDBDatabase;
 
@@ -30,7 +38,9 @@ export class LocalProjectStore {
 
   async putProject(project: StudioProject): Promise<void> {
     await this.open();
-    await requestResult(this.db!.transaction("projects", "readwrite").objectStore("projects").put(project));
+    const transaction = this.db!.transaction("projects", "readwrite");
+    const completed = transactionComplete(transaction);
+    await Promise.all([requestResult(transaction.objectStore("projects").put(project)), completed]);
   }
 
   async listProjects(): Promise<StudioProject[]> {
@@ -50,15 +60,14 @@ export class LocalProjectStore {
     const transaction = this.db!.transaction(["projects", "chunks"], "readwrite");
     transaction.objectStore("projects").delete(id);
     transaction.objectStore("chunks").delete(IDBKeyRange.bound([id, "", 0], [id, "\uffff", Number.MAX_SAFE_INTEGER]));
-    await new Promise<void>((resolve, reject) => {
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error ?? new Error("Could not delete local project"));
-    });
+    await transactionComplete(transaction);
   }
 
   async putChunk(projectId: string, source: string, index: number, blob: Blob): Promise<void> {
     await this.open();
-    await requestResult(this.db!.transaction("chunks", "readwrite").objectStore("chunks").put({ projectId, source, index, blob }));
+    const transaction = this.db!.transaction("chunks", "readwrite");
+    const completed = transactionComplete(transaction);
+    await Promise.all([requestResult(transaction.objectStore("chunks").put({ projectId, source, index, blob })), completed]);
   }
 
   async getChunks(projectId: string, source: string): Promise<Blob[]> {
@@ -66,5 +75,17 @@ export class LocalProjectStore {
     const request = this.db!.transaction("chunks").objectStore("chunks").index("by-project-source").getAll([projectId, source]);
     const rows = await requestResult<Array<{ index: number; blob: Blob }>>(request);
     return rows.sort((a, b) => a.index - b.index).map((row) => row.blob);
+  }
+
+  async validatePrimaryMedia(project: StudioProject, source: string): Promise<Blob> {
+    const descriptor = project.sources.find((item) => item.kind === source);
+    if (!descriptor) throw new Error("The recording has no primary video source metadata.");
+    const chunks = await this.getChunks(project.id, source);
+    if (!chunks.length || chunks.length !== descriptor.chunkCount || chunks.some((chunk) => chunk.size === 0)) {
+      throw new Error("The primary video was not fully saved in browser storage.");
+    }
+    const blob = new Blob(chunks, { type: descriptor.mimeType });
+    if (!blob.size) throw new Error("The saved primary video is empty.");
+    return blob;
   }
 }
