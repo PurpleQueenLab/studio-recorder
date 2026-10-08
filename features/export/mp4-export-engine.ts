@@ -91,7 +91,8 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
   onProgress(.08, audioBuffer ? "Encoding audio" : "Preparing video");
 
   const baseName = (requestedName || project.title).replace(/\.mp4$/i, "").trim() || formatExportFallback();
-  const filename = `${sanitizeFilename(baseName)}.mp4`;
+  const safeBaseName = sanitizeFilename(baseName);
+  const filename = `${safeBaseName}.mp4`;
   const saveWindow = window as SaveWindow;
   const destination = await createExportDestination(saveWindow, filename);
   const { fileHandle, bufferTarget, target, saveFallbackUsed } = destination;
@@ -99,7 +100,7 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
 
   const format = new Mp4OutputFormat({ fastStart: bufferTarget ? "in-memory" : false });
   const output = new Output({ format, target });
-  output.setMetadataTags({ title: project.title });
+  output.setMetadataTags({ title: safeBaseName });
   const videoInput = new Input({ formats: ALL_FORMATS, source: new BlobSource(videoBlob) });
   const outputSize = outputDimensions(project);
   let cameraSink: VideoSampleSink | undefined;

@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { previewPointFromSource, sourcePointFromPreview, zoomSourceRect, zoomTransformAt } from "@/lib/editor/composition";
 import { cameraPixelRect, coverSourceRect } from "@/lib/editor/camera-geometry";
-import { adjustAudioClip, adjustZoomEvent, clampTimelineTime, timelineTimeFromPosition } from "@/lib/editor/timeline";
-import { clipGainAt, duckingMultiplier, outputDuration, trackFadeAt, trackIsAudible, visibleTimelineSegments } from "@/lib/media/audio-mixer";
+import { adjustAudioClip, adjustZoomEvent, clampTimelineTime, deleteAudioRange, timelineTimeFromPosition } from "@/lib/editor/timeline";
+import { audioMixGainAt, audioMixItems, clipGainAt, duckingMultiplier, outputDuration, trackFadeAt, trackIsAudible, visibleTimelineSegments } from "@/lib/media/audio-mixer";
 import { createProject, deleteVideoRange, deriveZoomEvents, normalizeProject, reorderVideoClip, splitVideoClip, trimVideoClip, videoClipAtTime, videoTimelineDuration } from "@/lib/project";
 import type { AudioClip } from "@/types/project";
 
@@ -100,6 +100,69 @@ describe("non-destructive audio model", () => {
     expect(outputDuration(project)).toBe(6);
   });
 
+  const addClip = (project: ReturnType<typeof projectAt>, type: "music" | "voiceover", startTime = 0) => {
+    const clip: AudioClip = { id: type, sourceId: `${type}-asset`, trackType: type, startTime, sourceIn: 0, sourceOut: 4, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 };
+    project.audio.clips.push(clip);
+    return clip;
+  };
+
+  it("A: schedules and mixes music-only audio", () => {
+    const project = projectAt();
+    const music = addClip(project, "music");
+    expect(audioMixItems(project).map((item) => item.clip.trackType)).toEqual(["music"]);
+    expect(audioMixGainAt(project, music, 1)).toBeGreaterThan(0);
+  });
+
+  it("B: schedules and mixes voiceover-only audio", () => {
+    const project = projectAt();
+    const voiceover = addClip(project, "voiceover");
+    expect(audioMixItems(project).map((item) => item.clip.trackType)).toEqual(["voiceover"]);
+    expect(audioMixGainAt(project, voiceover, 1)).toBeGreaterThan(0);
+  });
+
+  it("C: schedules music and voiceover together", () => {
+    const project = projectAt();
+    addClip(project, "music"); addClip(project, "voiceover");
+    expect(audioMixItems(project).map((item) => item.clip.trackType)).toEqual(["music", "voiceover"]);
+  });
+
+  it("D: schedules narration, computer audio, voiceover, and music", () => {
+    const project = projectAt();
+    project.sources = [{ kind: "microphone", chunkCount: 1, mimeType: "audio/webm" }, { kind: "computer-audio", chunkCount: 1, mimeType: "audio/webm" }];
+    addClip(project, "voiceover"); addClip(project, "music");
+    expect(new Set(audioMixItems(project).map((item) => item.clip.trackType))).toEqual(new Set(["microphone", "computer-audio", "voiceover", "music"]));
+  });
+
+  it("E: removes muted music from the final gain", () => {
+    const project = projectAt();
+    const music = addClip(project, "music");
+    project.audio.tracks.music.muted = true;
+    expect(audioMixGainAt(project, music, 1)).toBe(0);
+  });
+
+  it("F: honors voiceover solo across every other track", () => {
+    const project = projectAt();
+    const music = addClip(project, "music");
+    const voiceover = addClip(project, "voiceover");
+    project.audio.tracks.voiceover.solo = true;
+    expect(audioMixGainAt(project, music, 1)).toBe(0);
+    expect(audioMixGainAt(project, voiceover, 1)).toBeGreaterThan(0);
+  });
+
+  it("G: keeps delayed voiceover at its actual timeline offset", () => {
+    const project = projectAt();
+    const voiceover = addClip(project, "voiceover", 3);
+    expect(audioMixGainAt(project, voiceover, 1)).toBe(0);
+    expect(audioMixGainAt(project, voiceover, 3.5)).toBeGreaterThan(0);
+  });
+
+  it("preserves audio timing when a timeline range is removed", () => {
+    const before = { id: "before", sourceId: "music", trackType: "music" as const, startTime: 0, sourceIn: 0, sourceOut: 8, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 };
+    const after = { ...before, id: "after", startTime: 8 };
+    const result = deleteAudioRange([before, after], 2, 4);
+    expect(result.map((clip) => [clip.startTime, clip.sourceIn, clip.sourceOut])).toEqual([[0, 0, 2], [2, 4, 8], [6, 0, 8]]);
+  });
+
   it("migrates legacy projects with independent tracks and local asset collections", () => {
     const project = projectAt();
     const legacy = { ...project, audio: undefined, assets: undefined, background: undefined, presentation: undefined, pointerEvents: undefined } as unknown as typeof project;
@@ -152,6 +215,7 @@ describe("MP4 metadata regression", () => {
   it("sets metadata on Output instead of Conversion options", () => {
     const source = readFileSync(new URL("../features/export/mp4-export-engine.ts", import.meta.url), "utf8");
     expect(source).toContain("output.setMetadataTags");
+    expect(source).toContain("output.setMetadataTags({ title: safeBaseName })");
     expect(source).not.toMatch(/new Conversion\s*\(\s*\{[^}]*\btags\s*:/s);
   });
 

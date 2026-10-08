@@ -104,6 +104,22 @@ export interface AudioProjectState {
   ducking: { enabled: boolean; amount: "light" | "medium" | "strong" };
 }
 
+export interface AudioToolsProject {
+  id: "current";
+  name: string;
+  exportName: string;
+  mimeType: string;
+  blob: Blob;
+  duration: number;
+  waveform: number[];
+  trimStart: number;
+  trimEnd: number;
+  volume: number;
+  fadeIn: number;
+  fadeOut: number;
+  updatedAt: string;
+}
+
 export interface BackgroundSettings {
   type: BackgroundType;
   value: string;
