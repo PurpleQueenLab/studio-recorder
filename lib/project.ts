@@ -1,6 +1,11 @@
-import type { NormalizedRect, RecordingMode, StudioProject, ZoomEvent } from "@/types/project";
+import type { AudioProjectState, AudioTrackType, NormalizedRect, PointerEventMetadata, RecordingMode, StudioProject, VideoClip, ZoomEvent } from "@/types/project";
+import { DEFAULT_CAPTURE_QUALITY } from "@/lib/media/quality";
 
 export const FULL_FRAME: NormalizedRect = { x: 0, y: 0, width: 1, height: 1 };
+
+export function primaryVideoSourceKind(mode: RecordingMode): "screen" | "camera" {
+  return mode === "camera" ? "camera" : "screen";
+}
 
 export function clampRect(rect: NormalizedRect): NormalizedRect {
   const width = Math.min(1, Math.max(0.05, rect.width));
@@ -37,11 +42,40 @@ export function mergeNearbyZooms(events: ZoomEvent[], threshold = 0.45): ZoomEve
     .sort((a, b) => a.time - b.time)
     .reduce<ZoomEvent[]>((merged, event) => {
       const previous = merged.at(-1);
-      if (previous && event.time - previous.time < threshold) {
-        merged[merged.length - 1] = { ...event, time: previous.time };
+      const distance = previous ? Math.hypot(event.x - previous.x, event.y - previous.y) : Number.POSITIVE_INFINITY;
+      if (previous && event.time - previous.time < threshold && distance < .18) {
+        merged[merged.length - 1] = { ...event, time: previous.time, duration: Math.max(previous.duration, event.duration + event.time - previous.time) };
       } else merged.push(event);
       return merged;
     }, []);
+}
+
+export function createDefaultAudioState(): AudioProjectState {
+  const track = (type: AudioTrackType) => ({ type, muted: false, solo: false, volume: type === "music" ? .45 : 1, fadeIn: 0, fadeOut: 0 });
+  return {
+    tracks: {
+      microphone: track("microphone"),
+      "computer-audio": track("computer-audio"),
+      voiceover: track("voiceover"),
+      music: track("music"),
+    },
+    clips: [],
+    waveforms: {},
+    ducking: { enabled: false, amount: "medium" },
+  };
+}
+
+export function deriveZoomEvents(clicks: PointerEventMetadata[], threshold = .45): ZoomEvent[] {
+  return mergeNearbyZooms(clicks.map((click) => ({
+    id: click.id,
+    time: Math.max(0, click.time - .15),
+    x: clamp(click.x, 0, 1),
+    y: clamp(click.y, 0, 1),
+    scale: 1.5,
+    duration: 1.4,
+    enabled: true,
+    source: "automatic" as const,
+  })), threshold);
 }
 
 export function editedTimestamp(project: StudioProject, timestamp: number, trimStart = 0): number | null {
@@ -70,28 +104,131 @@ export function createProject(mode: RecordingMode, now = new Date()): StudioProj
     updatedAt: stamp,
     duration: 0,
     mode,
+    quality: { ...DEFAULT_CAPTURE_QUALITY },
     sources: [],
     crop: FULL_FRAME,
-    camera: { visible: mode !== "screen", shape: "circle", rect: { x: 0.76, y: 0.68, width: 0.2, height: 0.27 } },
+    camera: { visible: mode !== "screen", shape: "circle", rect: { x: 0.76, y: 0.62, width: 0.2, height: 0.356 } },
     zoomEvents: [],
+    pointerEvents: [],
     cursor: { style: "system", size: 1, opacity: 1, shadow: true, smoothing: 0.65, clickEffect: "pulse" },
     canvas: { aspectRatio: "16:9", background: "#7563ea", fit: "fit", scale: 0.9 },
+    background: { type: "gradient", value: "linear-gradient(135deg, #7563ea 0%, #32256f 100%)", fit: "fill", blur: 24, brightness: .7 },
+    presentation: { scale: .88, x: .5, y: .5, padding: .06, cornerRadius: 18, shadow: .7, frame: "floating" },
+    audio: createDefaultAudioState(),
+    assets: [],
+    videoClips: [],
     trim: { start: 0, end: null },
     edits: [],
   };
 }
 
 export function normalizeProject(project: StudioProject): StudioProject {
+  const audioDefaults = createDefaultAudioState();
+  const legacySource = primaryVideoSourceKind(project.mode);
+  const videoClips = normalizeVideoClips(project.videoClips?.length ? project.videoClips : project.duration > 0 && project.sources?.some((source) => source.kind === legacySource) ? [{
+    id: `legacy-video-${project.id}`,
+    sourceId: legacySource,
+    name: project.title,
+    timelineStart: 0,
+    sourceIn: 0,
+    sourceOut: project.duration,
+  }] : []);
   return {
     ...project,
+    quality: project.quality ?? { ...DEFAULT_CAPTURE_QUALITY },
     crop: project.crop ?? FULL_FRAME,
-    camera: project.camera ?? { visible: project.mode !== "screen", shape: "circle", rect: { x: .76, y: .68, width: .2, height: .27 } },
-    zoomEvents: project.zoomEvents ?? [],
+    camera: project.camera ?? { visible: project.mode !== "screen", shape: "circle", rect: { x: .76, y: .62, width: .2, height: .356 } },
+    zoomEvents: (project.zoomEvents ?? []).map((event) => ({ enabled: true, source: "manual", ...event })),
+    pointerEvents: (project.pointerEvents ?? []).map((event) => ({
+      ...event,
+      clientX: event.clientX ?? event.x,
+      clientY: event.clientY ?? event.y,
+      observedWidth: event.observedWidth ?? 1,
+      observedHeight: event.observedHeight ?? 1,
+    })),
     cursor: project.cursor ?? { style: "system", size: 1, opacity: 1, shadow: true, smoothing: .65, clickEffect: "pulse" },
     canvas: project.canvas ?? { aspectRatio: "16:9", background: "#7563ea", fit: "fit", scale: .9 },
+    background: project.background ?? { type: "color", value: project.canvas?.background ?? "#7563ea", fit: "fill", blur: 24, brightness: .7 },
+    presentation: project.presentation ?? { scale: project.canvas?.scale ?? .9, x: .5, y: .5, padding: .06, cornerRadius: 18, shadow: .7, frame: "floating" },
+    audio: {
+      ...audioDefaults,
+      ...(project.audio ?? {}),
+      tracks: { ...audioDefaults.tracks, ...(project.audio?.tracks ?? {}) },
+      clips: project.audio?.clips ?? [],
+      waveforms: project.audio?.waveforms ?? {},
+      ducking: project.audio?.ducking ?? audioDefaults.ducking,
+    },
+    assets: project.assets ?? [],
+    videoClips,
+    duration: videoClips.length ? videoTimelineDuration(videoClips) : project.duration,
     trim: project.trim ?? { start: 0, end: null },
     edits: project.edits ?? [],
   };
+}
+
+export function videoClipDuration(clip: VideoClip): number {
+  return Math.max(0, clip.sourceOut - clip.sourceIn);
+}
+
+export function normalizeVideoClips(clips: VideoClip[]): VideoClip[] {
+  let timelineStart = 0;
+  return clips.filter((clip) => videoClipDuration(clip) >= .05).map((clip) => {
+    const next = { ...clip, timelineStart };
+    timelineStart += videoClipDuration(clip);
+    return next;
+  });
+}
+
+export function videoTimelineDuration(clips: VideoClip[]): number {
+  return clips.reduce((total, clip) => total + videoClipDuration(clip), 0);
+}
+
+export function videoClipAtTime(clips: VideoClip[], time: number): { clip: VideoClip; sourceTime: number } | undefined {
+  const clip = clips.find((item, index) => time >= item.timelineStart && (time < item.timelineStart + videoClipDuration(item) || index === clips.length - 1));
+  return clip ? { clip, sourceTime: clip.sourceIn + Math.min(videoClipDuration(clip), Math.max(0, time - clip.timelineStart)) } : undefined;
+}
+
+export function splitVideoClip(clips: VideoClip[], clipId: string, timelineTime: number, secondId = crypto.randomUUID()): VideoClip[] {
+  return normalizeVideoClips(clips.flatMap((clip) => {
+    if (clip.id !== clipId) return [clip];
+    const offset = timelineTime - clip.timelineStart;
+    if (offset <= .05 || offset >= videoClipDuration(clip) - .05) return [clip];
+    const cut = clip.sourceIn + offset;
+    return [{ ...clip, sourceOut: cut }, { ...clip, id: secondId, name: `${clip.name} split`, sourceIn: cut }];
+  }));
+}
+
+export function trimVideoClip(clips: VideoClip[], clipId: string, edge: "start" | "end", delta: number): VideoClip[] {
+  return normalizeVideoClips(clips.map((clip) => {
+    if (clip.id !== clipId) return clip;
+    return edge === "start"
+      ? { ...clip, sourceIn: Math.min(clip.sourceOut - .05, Math.max(0, clip.sourceIn + delta)) }
+      : { ...clip, sourceOut: Math.max(clip.sourceIn + .05, clip.sourceOut + delta) };
+  }));
+}
+
+export function reorderVideoClip(clips: VideoClip[], clipId: string, targetIndex: number): VideoClip[] {
+  const current = clips.findIndex((clip) => clip.id === clipId);
+  if (current < 0) return clips;
+  const next = [...clips];
+  const [clip] = next.splice(current, 1);
+  next.splice(Math.min(next.length, Math.max(0, targetIndex)), 0, clip);
+  return normalizeVideoClips(next);
+}
+
+export function deleteVideoRange(clips: VideoClip[], start: number, end: number): VideoClip[] {
+  if (end - start < .05) return clips;
+  return normalizeVideoClips(clips.flatMap((clip) => {
+    const clipStart = clip.timelineStart;
+    const clipEnd = clipStart + videoClipDuration(clip);
+    if (end <= clipStart || start >= clipEnd) return [clip];
+    const before = Math.max(0, start - clipStart);
+    const after = Math.max(0, clipEnd - end);
+    const result: VideoClip[] = [];
+    if (before >= .05) result.push({ ...clip, sourceOut: clip.sourceIn + before });
+    if (after >= .05) result.push({ ...clip, id: crypto.randomUUID(), name: `${clip.name} remainder`, sourceIn: clip.sourceOut - after });
+    return result;
+  }));
 }
 
 export function formatDefaultFilename(date: Date): string {
@@ -100,6 +237,14 @@ export function formatDefaultFilename(date: Date): string {
   }).format(date).replace(", at", " at");
 }
 
+export function formatExportFallback(date = new Date()): string {
+  const datePart = new Intl.DateTimeFormat("en-US", { month: "long", day: "numeric", year: "numeric" }).format(date);
+  const timePart = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).format(date).replace(":", "-");
+  return `${datePart} at ${timePart}`;
+}
+
 export function sanitizeFilename(name: string): string {
   return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").replace(/\s+/g, " ").trim().slice(0, 160) || "Untitled recording";
 }
+
+const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value));

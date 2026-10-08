@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampRect, cropAspect, cropPreset, createProject, editedTimestamp, formatDefaultFilename, mergeNearbyZooms, normalizeProject, sanitizeFilename } from "@/lib/project";
+import { clampRect, cropAspect, cropPreset, createProject, editedTimestamp, formatDefaultFilename, formatExportFallback, mergeNearbyZooms, normalizeProject, primaryVideoSourceKind, sanitizeFilename } from "@/lib/project";
 
 describe("project utilities", () => {
   it("keeps crop coordinates inside normalized bounds", () => {
@@ -15,14 +15,24 @@ describe("project utilities", () => {
   it("suppresses nearby zooms while preserving the first trigger time", () => {
     const events = [
       { id: "a", time: 1, x: .2, y: .2, scale: 1.5, duration: 1.4 },
-      { id: "b", time: 1.2, x: .8, y: .7, scale: 1.6, duration: 1.4 },
+      { id: "b", time: 1.2, x: .25, y: .24, scale: 1.6, duration: 1.4 },
     ];
-    expect(mergeNearbyZooms(events)).toEqual([{ ...events[1], time: 1 }]);
+    const merged = mergeNearbyZooms(events);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ id: "b", time: 1, x: .25, y: .24, scale: 1.6 });
+    expect(merged[0].duration).toBeCloseTo(1.6);
   });
 
   it("generates readable, filesystem-safe names", () => {
     expect(formatDefaultFilename(new Date("2026-10-07T09:05:00Z"))).toContain("October 7, 2026");
+    expect(formatExportFallback(new Date("2026-10-07T09:05:00Z"))).toMatch(/^October 7, 2026 at \d{1,2}-05 (AM|PM)$/);
     expect(sanitizeFilename('Demo: intro/part 1?')).toBe("Demo- intro-part 1-");
+  });
+
+  it("uses the camera recording as the primary video in camera-only projects", () => {
+    expect(primaryVideoSourceKind("camera")).toBe("camera");
+    expect(primaryVideoSourceKind("screen-camera")).toBe("screen");
+    expect(primaryVideoSourceKind("screen")).toBe("screen");
   });
 
   it("normalizes older locally stored projects without losing their identity", () => {

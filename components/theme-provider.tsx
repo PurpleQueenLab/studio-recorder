@@ -21,6 +21,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
+    document.querySelector<HTMLLinkElement>('link[rel="icon"]')?.setAttribute("href", theme === "dark" ? "/favicon-dark.png" : "/favicon-light.png");
     localStorage.setItem("studio-theme", theme);
   }, [theme]);
   const toggle = useCallback(() => setTheme((value) => value === "dark" ? "light" : "dark"), []);
