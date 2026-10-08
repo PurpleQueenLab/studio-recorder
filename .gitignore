@@ -2,6 +2,7 @@ node_modules/
 .next/
 coverage/
 .vercel/
+.env*.local
 *.log
 *.tsbuildinfo
 .DS_Store

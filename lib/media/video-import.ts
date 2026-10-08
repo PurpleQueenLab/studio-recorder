@@ -50,8 +50,12 @@ export async function generateThumbnail(blob: Blob, at = .5): Promise<Blob> {
     const video = document.createElement("video");
     video.muted = true; video.playsInline = true; video.preload = "auto"; video.src = url;
     await new Promise<void>((resolve, reject) => { video.onloadedmetadata = () => resolve(); video.onerror = () => reject(new Error("Thumbnail source cannot be decoded.")); });
-    video.currentTime = Math.min(Math.max(.25, at), Math.max(.25, video.duration - .05));
-    await new Promise<void>((resolve, reject) => { video.onseeked = () => resolve(); video.onerror = () => reject(new Error("Thumbnail frame cannot be read.")); });
+    const frameTime = Math.min(Math.max(.25, at), Math.max(.25, video.duration - .05));
+    await new Promise<void>((resolve, reject) => {
+      video.onseeked = () => resolve();
+      video.onerror = () => reject(new Error("Thumbnail frame cannot be read."));
+      video.currentTime = frameTime;
+    });
     const canvas = document.createElement("canvas");
     canvas.width = Math.min(960, video.videoWidth || 960); canvas.height = Math.round(canvas.width * (video.videoHeight || 540) / (video.videoWidth || 960));
     canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
