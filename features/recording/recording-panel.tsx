@@ -6,7 +6,6 @@ import { Camera01Icon, ComputerIcon, Mic01Icon, PauseIcon, PlayIcon, RecordIcon,
 import { CaptureEngine } from "@/lib/media/capture-engine";
 import type { CaptureAudioStatus } from "@/lib/media/capture-engine";
 import { configureStudioCaptureHandle } from "@/lib/media/pointer-capture";
-import { closeCameraMonitor, openCameraMonitor } from "@/lib/media/camera-monitor";
 import { DEFAULT_CAPTURE_QUALITY, qualityLabel, RESOLUTION_PRESETS, type QualitySupport } from "@/lib/media/quality";
 import { LocalProjectStore } from "@/lib/storage/project-store";
 import type { CaptureFrameRate, CaptureQuality, CaptureQualityLevel, CaptureResolution, RecordingMode } from "@/types/project";
@@ -29,8 +28,6 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
   const [pointerDiagnostic, setPointerDiagnostic] = useState<{ count: number; time: number; x: number; y: number }>();
   const [quality, setQuality] = useState<CaptureQuality>({ ...DEFAULT_CAPTURE_QUALITY });
   const [qualityOpen, setQualityOpen] = useState(false);
-  const [keepCameraVisible, setKeepCameraVisible] = useState(true);
-  const [cameraMonitorMessage, setCameraMonitorMessage] = useState("");
   const [qualitySupport, setQualitySupport] = useState<QualitySupport>({ resolutions: ["1080p"], frameRates: [30], verified: false });
   const previewRef = useRef<HTMLVideoElement>(null);
   const cameraRef = useRef<HTMLVideoElement>(null);
@@ -42,7 +39,7 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
   }));
 
   useEffect(() => { configureStudioCaptureHandle(); }, []);
-  useEffect(() => () => { void closeCameraMonitor(); engine.dispose(); }, [engine]);
+  useEffect(() => () => engine.dispose(), [engine]);
   useEffect(() => { void refreshDevices(); }, []);
   useEffect(() => {
     if (status !== "recording") return;
@@ -114,17 +111,12 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
   }
 
   async function startRecording() {
-    setError(""); setCameraMonitorMessage("");
-    if (mode === "screen-camera" && keepCameraVisible && cameraRef.current) {
-      const result = await openCameraMonitor(cameraRef.current);
-      if (result.message) setCameraMonitorMessage(result.message);
-    }
+    setError("");
     try { await engine.start(); }
-    catch (reason) { await closeCameraMonitor(); setError(reason instanceof Error ? reason.message : "Recording could not start."); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Recording could not start."); }
   }
 
   async function stopRecording() {
-    await closeCameraMonitor();
     try { const saved = await engine.stop(); if (saved) onSaved(saved); }
     catch { /* The capture engine exposes a durable-storage error in the panel. */ }
   }
@@ -166,8 +158,6 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
         <SourceRow icon={ComputerIcon} title="Computer audio" detail={mode === "camera" ? "Off for camera mode" : audioStatus?.computerAudio.available ? `${audioStatus.computerAudio.label || "Shared audio"} · live` : status === "idle" || status === "requesting" ? "Availability depends on the selected source" : "Computer audio was not shared by the browser"} enabled={mode !== "camera" && Boolean(audioStatus?.computerAudio.available)} />
         {status === "ready" && mode !== "camera" && !audioStatus?.computerAudio.available ? <p className="source-warning">The browser did not provide a system-audio track. Microphone narration will still be recorded.</p> : null}
         {status === "ready" ? <p className="source-diagnostic">{audioStatus?.pointerMetadata ? "Automatic click zoom is available for this Studio Recorder tab capture." : "This source does not expose reliable click coordinates; manual zoom remains available."}</p> : null}
-        {mode === "screen-camera" ? <><label className="check-row"><input type="checkbox" checked={keepCameraVisible} onChange={(event) => setKeepCameraVisible(event.target.checked)} disabled={status === "recording" || status === "paused" || status === "saving"} /> Keep camera visible while recording</label><p className="source-warning">Floating camera may appear in an entire-screen recording. Window or tab capture is recommended.</p></> : null}
-        {cameraMonitorMessage ? <p className="source-diagnostic" role="status">{cameraMonitorMessage}</p> : null}
         {process.env.NODE_ENV === "development" && pointerDiagnostic ? <p className="source-diagnostic" aria-live="polite">Captured click {pointerDiagnostic.count}: {formatDiagnosticTime(pointerDiagnostic.time)} · x {pointerDiagnostic.x.toFixed(2)} · y {pointerDiagnostic.y.toFixed(2)}</p> : null}
         <div className="quality-row"><span><small>Quality</small><strong>{qualityLabel(quality)}</strong></span><button type="button" aria-expanded={qualityOpen} onClick={() => setQualityOpen((value) => !value)} disabled={status === "requesting" || status === "recording" || status === "paused"}>{qualityOpen ? "Done" : "Change"}</button></div>
         {qualityOpen ? <QualityChooser quality={quality} support={qualitySupport} onChange={(next) => void updateQuality(next)} /> : null}
