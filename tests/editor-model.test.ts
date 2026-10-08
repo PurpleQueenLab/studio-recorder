@@ -182,4 +182,21 @@ describe("camera bubble geometry", () => {
   it("centre-crops camera video instead of stretching faces", () => {
     expect(coverSourceRect(1920, 1080, 300, 300)).toEqual({ x: 420, y: 0, width: 1080, height: 1080 });
   });
+
+  it("keeps the Screen + Camera track in capture, editor preview, and export without browser PiP", () => {
+    const capture = readFileSync(new URL("../lib/media/capture-engine.ts", import.meta.url), "utf8");
+    const recordingPanel = readFileSync(new URL("../features/recording/recording-panel.tsx", import.meta.url), "utf8");
+    const editor = readFileSync(new URL("../features/editor/editor-view.tsx", import.meta.url), "utf8");
+    const exporter = readFileSync(new URL("../features/export/mp4-export-engine.ts", import.meta.url), "utf8");
+    expect(capture).toContain('["camera", this.camera]');
+    expect(editor).toContain("mediaUrls.camera && project.camera.visible");
+    expect(exporter).toContain('project.mode === "screen-camera" ? await sourceBlob(store, project, "camera")');
+    expect(recordingPanel).not.toMatch(/pictureInPicture|camera-monitor|Keep camera visible while recording/);
+  });
+
+  it("keeps shared CTA padding and icon spacing comfortable", () => {
+    const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+    expect(css).toMatch(/\.primary \{[^}]*gap:7px[^}]*padding:10px 16px/);
+    expect(css).toMatch(/\.secondary,\.stop-button\{[^}]*gap:7px[^}]*padding:0 16px/);
+  });
 });

@@ -28,4 +28,15 @@ describe("LocalProjectStore", () => {
     expect(await (await store.getChunks(project.id, assetId))[0].text()).toBe("local-only");
     await store.deleteProject(project.id);
   });
+
+  it("only validates a complete non-empty primary recording", async () => {
+    const store = new LocalProjectStore();
+    const project = createProject("screen", new Date("2026-10-07T12:00:00Z"));
+    project.sources.push({ kind: "screen", mimeType: "video/webm", chunkCount: 2 });
+    await store.putChunk(project.id, "screen", 0, new Blob(["first"]));
+    await expect(store.validatePrimaryMedia(project, "screen")).rejects.toThrow("not fully saved");
+    await store.putChunk(project.id, "screen", 1, new Blob(["second"]));
+    await expect((await store.validatePrimaryMedia(project, "screen")).text()).resolves.toBe("firstsecond");
+    await store.deleteProject(project.id);
+  });
 });

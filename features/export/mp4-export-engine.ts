@@ -25,11 +25,18 @@ import type { StudioProject } from "@/types/project";
 
 export type ExportStage = "Preparing video" | "Rendering" | "Encoding audio" | "Finalizing MP4";
 type ExportProgress = (progress: number, stage: ExportStage) => void;
-type SaveWindow = Window & {
+export type SaveWindow = Pick<Window, never> & {
   showSaveFilePicker?: (options: {
     suggestedName: string;
     types: Array<{ description: string; accept: Record<string, string[]> }>;
   }) => Promise<FileSystemFileHandle>;
+};
+
+export type ExportDestination = {
+  fileHandle?: FileSystemFileHandle;
+  bufferTarget?: BufferTarget;
+  target: BufferTarget | StreamTarget;
+  saveFallbackUsed: boolean;
 };
 
 export interface ExportReceipt {
@@ -42,6 +49,7 @@ export interface ExportReceipt {
   duration: number;
   width: number;
   height: number;
+  saveFallbackUsed?: boolean;
 }
 
 export async function runMp4SelfTest(): Promise<ExportReceipt> {
@@ -72,7 +80,7 @@ export async function runMp4SelfTest(): Promise<ExportReceipt> {
   return validateCompatibleMp4(new Blob([target.buffer!], { type: "video/mp4" }), "self-test.mp4", true, { width: 640, height: 360 });
 }
 
-export async function exportCompatibleMp4(project: StudioProject, onProgress: ExportProgress, requestedName?: string): Promise<ExportReceipt> {
+export async function exportCompatibleMp4(project: StudioProject, onProgress: ExportProgress, requestedName?: string, onSaveFallback?: () => void): Promise<ExportReceipt> {
   onProgress(.01, "Preparing video");
   const store = new LocalProjectStore();
   const videoKind = primaryVideoSourceKind(project.mode);
@@ -85,25 +93,9 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
   const baseName = (requestedName || project.title).replace(/\.mp4$/i, "").trim() || formatExportFallback();
   const filename = `${sanitizeFilename(baseName)}.mp4`;
   const saveWindow = window as SaveWindow;
-  const useFileStream = Boolean(saveWindow.showSaveFilePicker);
-  if (project.duration > 20 * 60 && !useFileStream) {
-    throw new Error("This long export needs Chrome or Edge file streaming. Open the project there and try again.");
-  }
-
-  let fileHandle: FileSystemFileHandle | undefined;
-  let bufferTarget: BufferTarget | undefined;
-  let target: BufferTarget | StreamTarget;
-  if (useFileStream) {
-    fileHandle = await saveWindow.showSaveFilePicker!({
-      suggestedName: filename,
-      types: [{ description: "Compatible MP4 video", accept: { "video/mp4": [".mp4"] } }],
-    });
-    const writable = await fileHandle.createWritable();
-    target = new StreamTarget(writable as unknown as WritableStream<StreamTargetChunk>, { chunked: true });
-  } else {
-    bufferTarget = new BufferTarget();
-    target = bufferTarget;
-  }
+  const destination = await createExportDestination(saveWindow, filename);
+  const { fileHandle, bufferTarget, target, saveFallbackUsed } = destination;
+  if (saveFallbackUsed) onSaveFallback?.();
 
   const format = new Mp4OutputFormat({ fastStart: bufferTarget ? "in-memory" : false });
   const output = new Output({ format, target });
@@ -169,7 +161,7 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
   try {
     const receipt = await validateCompatibleMp4(resultBlob, filename, Boolean(audioBuffer), outputSize);
     if (bufferTarget) downloadBlob(resultBlob, filename);
-    return receipt;
+    return { ...receipt, saveFallbackUsed };
   } catch (error) {
     if (fileHandle) {
       const writable = await fileHandle.createWritable();
@@ -178,6 +170,21 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
     }
     throw error;
   }
+}
+
+export async function createExportDestination(saveWindow: SaveWindow, filename: string): Promise<ExportDestination> {
+  if (saveWindow.showSaveFilePicker) {
+    try {
+      const fileHandle = await saveWindow.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: "Compatible MP4 video", accept: { "video/mp4": [".mp4"] } }],
+      });
+      const writable = await fileHandle.createWritable();
+      return { fileHandle, target: new StreamTarget(writable as unknown as WritableStream<StreamTargetChunk>, { chunked: true }), saveFallbackUsed: false };
+    } catch { /* Fall through to the browser download target. */ }
+  }
+  const bufferTarget = new BufferTarget();
+  return { bufferTarget, target: bufferTarget, saveFallbackUsed: true };
 }
 
 async function sourceBlob(store: LocalProjectStore, project: StudioProject, kind: string): Promise<Blob | null> {

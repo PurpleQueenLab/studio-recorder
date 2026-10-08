@@ -11,7 +11,7 @@ import { LocalProjectStore } from "@/lib/storage/project-store";
 import type { CaptureFrameRate, CaptureQuality, CaptureQualityLevel, CaptureResolution, RecordingMode } from "@/types/project";
 import type { StudioProject } from "@/types/project";
 
-type Status = "idle" | "requesting" | "ready" | "recording" | "paused" | "stopped";
+type Status = "idle" | "requesting" | "ready" | "recording" | "paused" | "saving" | "stopped";
 type CameraPreviewState = "not-requested" | "loading" | "ready" | "denied" | "disconnected";
 
 export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) => void }) {
@@ -110,6 +110,17 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
     } catch { /* A readable message is set by the engine. */ }
   }
 
+  async function startRecording() {
+    setError("");
+    try { await engine.start(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Recording could not start."); }
+  }
+
+  async function stopRecording() {
+    try { const saved = await engine.stop(); if (saved) onSaved(saved); }
+    catch { /* The capture engine exposes a durable-storage error in the panel. */ }
+  }
+
   const time = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
 
   return <section className="recording-workspace" aria-labelledby="record-heading">
@@ -151,9 +162,9 @@ export function RecordingPanel({ onSaved }: { onSaved: (project: StudioProject) 
         <div className="quality-row"><span><small>Quality</small><strong>{qualityLabel(quality)}</strong></span><button type="button" aria-expanded={qualityOpen} onClick={() => setQualityOpen((value) => !value)} disabled={status === "requesting" || status === "recording" || status === "paused"}>{qualityOpen ? "Done" : "Change"}</button></div>
         {qualityOpen ? <QualityChooser quality={quality} support={qualitySupport} onChange={(next) => void updateQuality(next)} /> : null}
         {error && <p className="error-message" role="alert">{error}</p>}
-        {status === "idle" || status === "stopped" ? <button className="primary wide" onClick={prepare}>Choose sources</button> : status === "requesting" ? <button className="primary wide" disabled>Waiting for browser permission…</button> : status === "ready" ? <button className="primary wide" onClick={() => engine.start()}>Start recording</button> : <div className="record-actions">
+        {status === "idle" || status === "stopped" ? <button className="primary wide" onClick={prepare}>Choose sources</button> : status === "requesting" ? <button className="primary wide" disabled>Waiting for browser permission…</button> : status === "saving" ? <button className="primary wide" disabled>Saving recording locally...</button> : status === "ready" ? <button className="primary wide" onClick={() => void startRecording()}>Start recording</button> : <div className="record-actions">
           <button className="secondary" aria-label={status === "paused" ? "Resume" : "Pause"} onClick={() => status === "paused" ? engine.resume() : engine.pause()}><HugeiconsIcon icon={status === "paused" ? PlayIcon : PauseIcon} size={18} /></button>
-          <button className="stop-button" onClick={async () => { const saved = await engine.stop(); if (saved) onSaved(saved); }}><HugeiconsIcon icon={StopIcon} size={17} /> Stop</button>
+          <button className="stop-button" onClick={() => void stopRecording()}><HugeiconsIcon icon={StopIcon} size={17} /> Stop</button>
         </div>}
         <p className="storage-note">Recording chunks are written to browser storage every 2 seconds to keep memory bounded.</p>
       </aside>

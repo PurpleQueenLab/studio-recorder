@@ -15,6 +15,7 @@ import type { ExportReceipt } from "@/features/export/mp4-export-engine";
 import { BugReportDialog } from "@/components/bug-report-dialog";
 import { ensureProjectThumbnail, importVideoAsProject } from "@/lib/media/video-import";
 import { LocalProjectStore } from "@/lib/storage/project-store";
+import { canAttemptChunkReload, isChunkLoadFailure } from "@/lib/chunk-recovery";
 
 const EditorView = dynamic(
   () => import("@/features/editor/editor-view").then((module) => module.EditorView),
@@ -27,11 +28,29 @@ export function StudioApp() {
   const [view, setView] = useState<View>("library");
   const [selectedProject, setSelectedProject] = useState<StudioProject>();
   const [bugReportOpen, setBugReportOpen] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
   const [projectStore] = useState(() => new LocalProjectStore());
   const importInput = useRef<HTMLInputElement>(null);
   const { theme, toggle } = useTheme();
   const capabilities: BrowserCapabilities | undefined = view === "settings" && typeof window !== "undefined" ? detectCapabilities() : undefined;
   useEffect(() => { document.title = `${view === "library" ? "Library" : view === "record" ? "Record" : view === "editor" ? "Editor" : view === "audio" ? "Audio Tools" : "Settings"} — Studio Recorder`; }, [view]);
+  useEffect(() => {
+    let reloadTimer = 0;
+    const recover = (reason: unknown) => {
+      if (!isChunkLoadFailure(reason)) return;
+      if (canAttemptChunkReload(sessionStorage)) {
+        setUpdateMessage("Studio Recorder was updated. Refreshing to load the latest version. Your locally saved projects will remain available.");
+        reloadTimer = window.setTimeout(() => location.reload(), 1_200);
+      } else {
+        setUpdateMessage("Studio Recorder was updated, but the latest files could not be loaded. Refresh this page manually. Your locally saved projects will remain available.");
+      }
+    };
+    const onError = (event: ErrorEvent) => recover(event.error ?? event.message);
+    const onRejection = (event: PromiseRejectionEvent) => recover(event);
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => { window.removeEventListener("error", onError); window.removeEventListener("unhandledrejection", onRejection); clearTimeout(reloadTimer); };
+  }, []);
 
   async function importStandaloneVideo(file?: File) {
     if (!file) return;
@@ -55,9 +74,10 @@ export function StudioApp() {
       <NavButton icon={Mic02Icon} label="Audio tools" active={view === "audio"} onClick={() => setView("audio")} />
       <NavButton icon={Settings02Icon} label="Settings" active={view === "settings"} onClick={() => setView("settings")} />
     </nav><button className="sidebar-support" onClick={() => setBugReportOpen(true)}><HugeiconsIcon icon={Bug01Icon} size={18} /> Report a bug</button><div className="storage-card"><strong>Local storage</strong><div className="storage-meter"><i /></div><small>Stored in this browser only</small><p>Clearing site data removes local projects. Save finished videos to your computer.</p></div></aside>
-    <main>{view === "library" ? <LibraryView onRecord={() => setView("record")} onImport={() => importInput.current?.click()} onOpen={(project) => { setSelectedProject(project); setView("editor"); }} /> : null}{view === "record" ? <RecordingPanel onSaved={(project) => { void ensureProjectThumbnail(project).catch(() => project); setSelectedProject(project); setView("editor"); }} /> : null}{view === "editor" && selectedProject ? <EditorView initialProject={selectedProject} onBack={() => setView("library")} /> : null}{view === "audio" ? <AudioToolsView /> : null}{view === "settings" ? <Settings capabilities={capabilities} /> : null}</main>
+    <main>{view === "library" ? <LibraryView onRecord={() => setView("record")} onImport={() => importInput.current?.click()} onOpen={(project) => { setSelectedProject(project); setView("editor"); }} /> : null}{view === "record" ? <RecordingPanel onSaved={(project) => { void ensureProjectThumbnail(project).catch(() => project); setSelectedProject(project); setView("editor"); }} /> : null}{view === "editor" && selectedProject ? <EditorView initialProject={selectedProject} onBack={() => setView("library")} onDelete={async (project) => { await projectStore.deleteProject(project.id); setSelectedProject(undefined); setView("library"); }} /> : null}{view === "audio" ? <AudioToolsView /> : null}{view === "settings" ? <Settings capabilities={capabilities} /> : null}</main>
     <input ref={importInput} hidden type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; void importStandaloneVideo(file); }} />
     <BugReportDialog open={bugReportOpen} onClose={() => setBugReportOpen(false)} context={view} />
+    {updateMessage ? <p className="editor-toast error-message" role="alert">{updateMessage}</p> : null}
   </div>;
 }
 
