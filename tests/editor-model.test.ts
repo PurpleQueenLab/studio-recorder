@@ -4,7 +4,7 @@ import { previewPointFromSource, sourcePointFromPreview, zoomSourceRect, zoomTra
 import { cameraPixelRect, coverSourceRect } from "@/lib/editor/camera-geometry";
 import { adjustAudioClip, adjustZoomEvent, clampTimelineTime, timelineTimeFromPosition } from "@/lib/editor/timeline";
 import { clipGainAt, duckingMultiplier, outputDuration, trackFadeAt, trackIsAudible, visibleTimelineSegments } from "@/lib/media/audio-mixer";
-import { createProject, deriveZoomEvents, normalizeProject } from "@/lib/project";
+import { createProject, deleteVideoRange, deriveZoomEvents, normalizeProject, reorderVideoClip, splitVideoClip, trimVideoClip, videoClipAtTime, videoTimelineDuration } from "@/lib/project";
 import type { AudioClip } from "@/types/project";
 
 const projectAt = (duration = 10) => {
@@ -111,6 +111,43 @@ describe("non-destructive audio model", () => {
   });
 });
 
+describe("multi-video edit model", () => {
+  const clips = [
+    { id: "a", sourceId: "one", name: "One", timelineStart: 0, sourceIn: 1, sourceOut: 5 },
+    { id: "b", sourceId: "two", name: "Two", timelineStart: 4, sourceIn: 0, sourceOut: 3 },
+  ];
+
+  it("splits the selected clip without changing output duration", () => {
+    const result = splitVideoClip(clips, "a", 2, "split");
+    expect(result.map((clip) => [clip.id, clip.timelineStart, clip.sourceIn, clip.sourceOut])).toEqual([
+      ["a", 0, 1, 3], ["split", 2, 3, 5], ["b", 4, 0, 3],
+    ]);
+    expect(videoTimelineDuration(result)).toBe(7);
+  });
+
+  it("trims, reorders, and maps timeline time to source time", () => {
+    const trimmed = trimVideoClip(clips, "a", "start", 1);
+    expect(trimmed[0]).toMatchObject({ sourceIn: 2, timelineStart: 0 });
+    expect(trimmed[1].timelineStart).toBe(3);
+    const reordered = reorderVideoClip(trimmed, "b", 0);
+    expect(reordered.map((clip) => clip.id)).toEqual(["b", "a"]);
+    expect(videoClipAtTime(reordered, 3.5)).toMatchObject({ clip: { id: "a" }, sourceTime: 2.5 });
+  });
+
+  it("deletes a range across clips while preserving source media", () => {
+    const result = deleteVideoRange(clips, 2, 5);
+    expect(videoTimelineDuration(result)).toBe(4);
+    expect(result.map((clip) => [clip.sourceId, clip.sourceIn, clip.sourceOut])).toEqual([["one", 1, 3], ["two", 1, 3]]);
+  });
+
+  it("adds a legacy video clip during additive migration", () => {
+    const project = projectAt(8);
+    project.sources = [{ kind: "screen", chunkCount: 1, mimeType: "video/webm" }];
+    project.videoClips = [];
+    expect(normalizeProject(project).videoClips[0]).toMatchObject({ sourceId: "screen", sourceIn: 0, sourceOut: 8 });
+  });
+});
+
 describe("MP4 metadata regression", () => {
   it("sets metadata on Output instead of Conversion options", () => {
     const source = readFileSync(new URL("../features/export/mp4-export-engine.ts", import.meta.url), "utf8");
@@ -124,6 +161,13 @@ describe("MP4 metadata regression", () => {
     expect(editor).toContain('tool === "crop" && !playing ? <CropOverlay');
     expect(css).toContain("--bg-selected: var(--primary)");
     expect(css).toContain("--accent: var(--primary)");
+  });
+
+  it("prefers generated local thumbnails and keeps theme-specific fallbacks", () => {
+    const library = readFileSync(new URL("../features/library/library-view.tsx", import.meta.url), "utf8");
+    const theme = readFileSync(new URL("../components/theme-provider.tsx", import.meta.url), "utf8");
+    expect(library).toContain('thumbnailUrls[project.id] ?? (theme === "dark" ? "/thumbnail-dark.png" : "/thumbnail-light.png")');
+    expect(theme).toContain('theme === "dark" ? "/favicon-dark.png" : "/favicon-light.png"');
   });
 });
 

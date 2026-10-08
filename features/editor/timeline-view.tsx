@@ -4,20 +4,25 @@ import { useRef } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Mic01Icon, MusicNote02Icon, VolumeMute01Icon, VolumeHighIcon } from "@hugeicons/core-free-icons";
 import { adjustAudioClip, adjustZoomEvent, timelineTimeFromPosition } from "@/lib/editor/timeline";
+import { reorderVideoClip, trimVideoClip, videoClipDuration } from "@/lib/project";
 import { audioTrackLabel } from "@/features/editor/use-audio-preview";
 import type { AudioClip, AudioTrackType, StudioProject } from "@/types/project";
 
 type Commit = (update: (value: StudioProject) => StudioProject) => void;
 
-export function TimelineView({ project, currentTime, seek, commit, selectedClipId, onSelectClip, selectedZoomId, onSelectZoom }: {
+export function TimelineView({ project, currentTime, seek, commit, selectedClipId, onSelectClip, selectedVideoClipId, onSelectVideoClip, selectedZoomId, onSelectZoom, markIn, markOut }: {
   project: StudioProject;
   currentTime: number;
   seek: (time: number) => void;
   commit: Commit;
   selectedClipId?: string;
   onSelectClip: (id?: string) => void;
+  selectedVideoClipId?: string;
+  onSelectVideoClip: (id?: string) => void;
   selectedZoomId?: string;
   onSelectZoom: (id: string) => void;
+  markIn: number;
+  markOut: number;
 }) {
   const lanesRef = useRef<HTMLDivElement>(null);
   const duration = Math.max(.1, project.duration);
@@ -36,7 +41,7 @@ export function TimelineView({ project, currentTime, seek, commit, selectedClipI
     <div className="timeline-label-column"><span>Tracks</span>{["Screen", "Camera", "Original narration", "Computer audio", "Voiceover", "Music", "Zoom", "Cursor"].map((label) => <span key={label}>{label}</span>)}</div>
     <div className="timeline-lanes" ref={lanesRef} onPointerDown={startScrub} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) seekFromPointer(event); }}>
       <div className="time-ruler">{Array.from({ length: 9 }, (_, index) => <span key={index} style={{ left: `${index / 8 * 100}%` }}>{formatPrecise(project.duration * index / 8)}</span>)}</div>
-      <SimpleLane className="screen" />
+      <VideoLane project={project} duration={duration} commit={commit} selectedId={selectedVideoClipId} onSelect={onSelectVideoClip} />
       <SimpleLane className="camera" hidden={project.mode === "screen"} />
       <AudioLane type="microphone" project={project} duration={duration} commit={commit} />
       <AudioLane type="computer-audio" project={project} duration={duration} commit={commit} />
@@ -44,9 +49,30 @@ export function TimelineView({ project, currentTime, seek, commit, selectedClipI
       <AudioLane type="music" project={project} duration={duration} commit={commit} selectedClipId={selectedClipId} onSelectClip={onSelectClip} />
       <div className="track-lane zoom">{project.zoomEvents.map((zoom) => <ZoomBlock key={zoom.id} zoom={zoom} duration={duration} selected={selectedZoomId === zoom.id} commit={commit} onSelect={() => onSelectZoom(zoom.id)} />)}</div>
       <div className="track-lane cursor">{project.pointerEvents.map((pointer) => <i key={pointer.id} className="cursor-event" style={{ left: `${pointer.time / duration * 100}%` }} title={`Click at ${formatPrecise(pointer.time)}`} />)}</div>
+      <div className="range-selection" style={{ left: `${markIn / duration * 100}%`, width: `${Math.max(0, markOut - markIn) / duration * 100}%` }} aria-label={`Selected range ${formatPrecise(markIn)} to ${formatPrecise(markOut)}`}><i className="range-handle in" /><i className="range-handle out" /></div>
       <button className="playhead-hit" style={{ left: `${currentTime / duration * 100}%` }} onPointerDown={(event) => { event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); seekFromPointer(event); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) seekFromPointer(event); }} aria-label={`Playhead at ${formatPrecise(currentTime)}`}><i /><span>{formatPrecise(currentTime)}</span></button>
     </div>
   </div>;
+}
+
+function VideoLane({ project, duration, commit, selectedId, onSelect }: { project: StudioProject; duration: number; commit: Commit; selectedId?: string; onSelect: (id?: string) => void }) {
+  return <div className="track-lane video-lane">{project.videoClips.map((clip, index) => <VideoClipBlock key={clip.id} clip={clip} index={index} count={project.videoClips.length} duration={duration} selected={selectedId === clip.id} commit={commit} onSelect={() => onSelect(clip.id)} />)}</div>;
+}
+
+function VideoClipBlock({ clip, index, count, duration, selected, commit, onSelect }: { clip: StudioProject["videoClips"][number]; index: number; count: number; duration: number; selected: boolean; commit: Commit; onSelect: () => void }) {
+  const drag = useRef<{ x: number; mode: "move" | "start" | "end" } | undefined>(undefined);
+  const start = (event: React.PointerEvent, mode: "move" | "start" | "end") => { event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); drag.current = { x: event.clientX, mode }; onSelect(); };
+  const move = (event: React.PointerEvent) => {
+    if (!drag.current) return;
+    const lane = event.currentTarget.parentElement!;
+    const delta = (event.clientX - drag.current.x) / lane.getBoundingClientRect().width * duration;
+    if (drag.current.mode === "move") {
+      const target = Math.min(count - 1, Math.max(0, Math.floor(event.clientX - lane.getBoundingClientRect().left) / lane.getBoundingClientRect().width * count));
+      if (target !== index) commit((project) => ({ ...project, videoClips: reorderVideoClip(project.videoClips, clip.id, target) }));
+    } else commit((project) => { const edge = drag.current!.mode === "start" ? "start" : "end"; const videoClips = trimVideoClip(project.videoClips, clip.id, edge, delta); return { ...project, videoClips, duration: videoClips.reduce((sum, item) => sum + videoClipDuration(item), 0) }; });
+    drag.current.x = event.clientX;
+  };
+  return <button className={`timeline-clip video-clip ${selected ? "selected" : ""}`} style={{ left: `${clip.timelineStart / duration * 100}%`, width: `${videoClipDuration(clip) / duration * 100}%` }} onPointerDown={(event) => start(event, "move")} onPointerMove={move} onPointerUp={() => { drag.current = undefined; }} title={`${clip.name} · ${formatPrecise(videoClipDuration(clip))}`}><i className="clip-handle start" onPointerDown={(event) => start(event, "start")} /><span>{clip.name}</span><i className="clip-handle end" onPointerDown={(event) => start(event, "end")} /></button>;
 }
 
 function SimpleLane({ className, hidden }: { className: string; hidden?: boolean }) {

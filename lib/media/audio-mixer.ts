@@ -114,12 +114,23 @@ export async function renderProjectAudioMix(project: StudioProject, store: Local
     const chunks = await store.getChunks(project.id, clip.sourceId);
     if (chunks.length) items.push({ clip, blob: new Blob(chunks, { type: asset.mimeType }) });
   }
+  for (const video of project.videoClips) {
+    const asset = project.assets.find((item) => item.id === video.sourceId && item.kind === "video");
+    if (!asset || !trackIsAudible(project, "computer-audio")) continue;
+    const chunks = await store.getChunks(project.id, video.sourceId);
+    if (chunks.length) items.push({
+      clip: { id: `video-audio-${video.id}`, sourceId: video.sourceId, trackType: "computer-audio", startTime: video.timelineStart, sourceIn: video.sourceIn, sourceOut: video.sourceOut, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+      blob: new Blob(chunks, { type: asset.mimeType }),
+    });
+  }
   if (!items.length) return null;
 
   const decodeContext = new AudioContext({ sampleRate: 48_000 });
   let decoded: Array<{ clip: AudioClip; buffer: AudioBuffer }>;
   try {
-    decoded = await Promise.all(items.map(async ({ clip, blob }) => ({ clip, buffer: await decodeContext.decodeAudioData(await blob.arrayBuffer()) })));
+    decoded = (await Promise.all(items.map(async ({ clip, blob }) => {
+      try { return { clip, buffer: await decodeContext.decodeAudioData(await blob.arrayBuffer()) }; } catch { return null; }
+    }))).filter((item): item is { clip: AudioClip; buffer: AudioBuffer } => Boolean(item));
   } finally {
     await decodeContext.close();
   }

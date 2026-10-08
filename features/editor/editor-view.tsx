@@ -10,7 +10,8 @@ import { previewPointFromSource, previewZoomStyle, sourcePointFromPreview, zoomT
 import { squareNormalizedRect } from "@/lib/editor/camera-geometry";
 import { clampTimelineTime } from "@/lib/editor/timeline";
 import { createWaveform } from "@/lib/media/audio-mixer";
-import { clampRect, cropAspect, cropPreset, formatExportFallback, FULL_FRAME, primaryVideoSourceKind } from "@/lib/project";
+import { clampRect, cropAspect, cropPreset, deleteVideoRange, formatExportFallback, FULL_FRAME, normalizeVideoClips, primaryVideoSourceKind, splitVideoClip, videoClipAtTime, videoClipDuration } from "@/lib/project";
+import { appendVideoToProject } from "@/lib/media/video-import";
 import { LocalProjectStore } from "@/lib/storage/project-store";
 import type { AudioClip, AudioTrackType, CursorStyle, NormalizedRect, ProjectAsset, StudioProject } from "@/types/project";
 
@@ -32,6 +33,7 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
   const [markOut, setMarkOut] = useState(Math.max(0, project.duration));
   const [selectedZoomId, setSelectedZoomId] = useState<string>();
   const [selectedClipId, setSelectedClipId] = useState<string>();
+  const [selectedVideoClipId, setSelectedVideoClipId] = useState<string | undefined>(project.videoClips[0]?.id);
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<AudioTrackType>("microphone");
   const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [exportStage, setExportStage] = useState<ExportStage>("Preparing video");
@@ -54,6 +56,7 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
   const waveformJobs = useRef(new Set<string>());
   const backgroundInputRef = useRef<HTMLInputElement>(null);
   const musicInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
   const store = useMemo(() => new LocalProjectStore(), []);
   const { sync: syncAudio, pause: pauseAudio } = useAudioPreview(project, mediaUrls);
   const selectedZoom = project.zoomEvents.find((zoom) => zoom.id === selectedZoomId) ?? project.zoomEvents.find((event) => currentTime >= event.time && currentTime <= event.time + event.duration) ?? project.zoomEvents.at(-1);
@@ -67,12 +70,12 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
     let disposed = false;
     void buildMediaUrls(store, project.id, project.mode, project.sources, project.assets).then((next) => {
       if (disposed) { Object.values(next).forEach(URL.revokeObjectURL); return; }
-      if (!next.video) throw new Error("The primary local video source is missing or unreadable.");
+      if (!next.video && !project.videoClips.some((clip) => next[clip.sourceId])) throw new Error("The primary local video source is missing or unreadable.");
       setMediaUrls((current) => { Object.values(current).forEach(URL.revokeObjectURL); return next; });
       setMediaState("ready");
     }).catch((reason) => { if (!disposed) { setMediaState("error"); setError(reason instanceof Error ? reason.message : "Local media could not be opened."); } });
     return () => { disposed = true; };
-  }, [mediaRetry, project.id, project.mode, project.assets, project.sources, store]);
+  }, [mediaRetry, project.id, project.mode, project.assets, project.sources, project.videoClips, store]);
 
   useEffect(() => () => { setMediaUrls((current) => { Object.values(current).forEach(URL.revokeObjectURL); return {}; }); }, []);
   useEffect(() => { const timer = setTimeout(() => void store.putProject({ ...project, updatedAt: new Date().toISOString() }), 250); return () => clearTimeout(timer); }, [project, store]);
@@ -93,16 +96,22 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
   const seek = useCallback((time: number) => {
     const next = clampTimelineTime(time, project.duration);
     setCurrentTime(next);
-    if (videoRef.current) videoRef.current.currentTime = next;
+    const active = videoClipAtTime(project.videoClips, next);
+    if (videoRef.current) videoRef.current.currentTime = active?.sourceTime ?? next;
     if (cameraRef.current) cameraRef.current.currentTime = next;
     if (backgroundVideoRef.current) backgroundVideoRef.current.currentTime = next;
     syncAudio(next, playing);
-  }, [playing, project.duration, syncAudio]);
+  }, [playing, project.duration, project.videoClips, syncAudio]);
+
+  const activeVideo = videoClipAtTime(project.videoClips, currentTime);
+  const activeVideoUrl = activeVideo ? mediaUrls[activeVideo.clip.sourceId] ?? mediaUrls.video : mediaUrls.video;
 
   const togglePlayback = useCallback(async () => {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
+      const active = videoClipAtTime(project.videoClips, currentTime);
+      if (active && Math.abs(video.currentTime - active.sourceTime) > .1) video.currentTime = active.sourceTime;
       await video.play();
       void cameraRef.current?.play().catch(() => undefined);
       void backgroundVideoRef.current?.play().catch(() => undefined);
@@ -110,7 +119,7 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
     } else {
       video.pause(); cameraRef.current?.pause(); backgroundVideoRef.current?.pause(); pauseAudio(); setPlaying(false);
     }
-  }, [pauseAudio, syncAudio]);
+  }, [currentTime, pauseAudio, project.videoClips, syncAudio]);
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
@@ -128,12 +137,30 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
     if (!playing) return;
     let frame = 0;
     const followPlayback = () => {
-      if (videoRef.current) setCurrentTime(videoRef.current.currentTime);
+      if (videoRef.current) {
+        const active = videoClipAtTime(project.videoClips, currentTime);
+        if (active) {
+          const timelineTime = active.clip.timelineStart + videoRef.current.currentTime - active.clip.sourceIn;
+          const clipEnd = active.clip.timelineStart + videoClipDuration(active.clip);
+          if (timelineTime >= clipEnd - .025) seek(Math.min(project.duration, clipEnd + .001));
+          else setCurrentTime(Math.max(active.clip.timelineStart, timelineTime));
+        }
+      }
       frame = requestAnimationFrame(followPlayback);
     };
     frame = requestAnimationFrame(followPlayback);
     return () => cancelAnimationFrame(frame);
-  }, [playing]);
+  }, [currentTime, playing, project.duration, project.videoClips, seek]);
+
+  const activeVideoClipId = activeVideo?.clip.id;
+  useEffect(() => {
+    const active = videoClipAtTime(project.videoClips, currentTime);
+    if (!videoRef.current || !active) return;
+    if (Math.abs(videoRef.current.currentTime - active.sourceTime) > .12) videoRef.current.currentTime = active.sourceTime;
+    if (playing) void videoRef.current.play().catch(() => setPlaying(false));
+    // Clip switches are the only synchronization boundary; ordinary playback updates currentTime itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeVideoClipId, activeVideoUrl]);
 
   useEffect(() => () => { voiceoverRecorder.current?.stop(); voiceoverStream.current?.getTracks().forEach((track) => track.stop()); }, []);
 
@@ -220,7 +247,22 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
       commit((value) => ({ ...value, audio: { ...value.audio, clips: value.audio.clips.flatMap((clip) => clip.id === selectedClip.id ? [{ ...clip, sourceOut: clip.sourceIn + splitOffset }, second] : [clip]) } }));
       setSelectedClipId(second.id); return;
     }
-    commit((value) => ({ ...value, edits: [...value.edits, { type: "split", start: currentTime, end: currentTime }] }));
+    const target = project.videoClips.find((clip) => clip.id === selectedVideoClipId) ?? videoClipAtTime(project.videoClips, currentTime)?.clip;
+    if (!target) return;
+    const secondId = crypto.randomUUID();
+    commit((value) => ({ ...value, videoClips: splitVideoClip(value.videoClips, target.id, currentTime, secondId), edits: [...value.edits, { type: "split", start: currentTime, end: currentTime }] }));
+    setSelectedVideoClipId(secondId);
+  }
+
+  async function addVideo(file?: File) {
+    if (!file) return;
+    setError("");
+    try {
+      const updated = await appendVideoToProject(project, file, store);
+      commit(() => updated);
+      setSelectedVideoClipId(updated.videoClips.at(-1)?.id);
+      setMediaState("loading");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "The selected video could not be imported. Try MP4, MOV, or WebM supported by this browser."); }
   }
 
   const presentationScale = project.presentation.scale * (1 - project.presentation.padding * 2);
@@ -238,10 +280,10 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
       <div className="editor-stage-wrap">
         <div className={`editor-stage aspect-${project.canvas.aspectRatio.replace(":", "-")} background-${project.background.type}`} onClick={(event) => { if (tool !== "zoom" || !selectedZoom) return; const frame = event.currentTarget.querySelector<HTMLElement>(".video-frame"); const rect = frame?.getBoundingClientRect(); if (!rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return; const point = sourcePointFromPreview(project, currentTime, (event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height); commit((value) => ({ ...value, zoomEvents: value.zoomEvents.map((zoom) => zoom.id === selectedZoom.id ? { ...zoom, ...point } : zoom) })); }}>
           <div className="editor-background" style={backgroundStyle} />
-          {project.background.type === "blurred-source" && mediaUrls.video ? <video ref={backgroundVideoRef} className="blurred-source-background" src={mediaUrls.video} muted playsInline style={{ filter: `blur(${project.background.blur}px) brightness(${project.background.brightness})` }} /> : null}
+          {project.background.type === "blurred-source" && activeVideoUrl ? <video ref={backgroundVideoRef} className="blurred-source-background" src={activeVideoUrl} muted playsInline style={{ filter: `blur(${project.background.blur}px) brightness(${project.background.brightness})` }} /> : null}
           <div className={`video-frame frame-${project.presentation.frame}`} style={screenStyle}>
             {project.presentation.frame === "browser" || project.presentation.frame === "macos" ? <div className="window-frame-bar"><i /><i /><i /></div> : null}
-            {mediaState === "ready" && mediaUrls.video ? <video ref={videoRef} src={mediaUrls.video} muted playsInline style={previewZoomStyle(previewProject, currentTime)} onError={() => { setMediaState("error"); setError("The primary local video could not be decoded by this browser."); }} onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; setCurrentTime(time); syncAudio(time, !event.currentTarget.paused); if (cameraRef.current && Math.abs(cameraRef.current.currentTime - time) > .15) cameraRef.current.currentTime = time; if (backgroundVideoRef.current && Math.abs(backgroundVideoRef.current.currentTime - time) > .15) backgroundVideoRef.current.currentTime = time; }} onEnded={() => { setPlaying(false); pauseAudio(); }} /> : mediaState === "error" ? <div className="media-error"><strong>Local media could not be opened</strong><p>The recording may be missing from browser storage or use an unsupported format.</p><div><button className="secondary" onClick={() => { setError(""); setMediaState("loading"); setMediaRetry((value) => value + 1); }}>Retry</button><button className="text-button" onClick={onBack}>Return to Library</button></div></div> : <div className="loading-media">Loading local media…</div>}
+            {mediaState === "ready" && activeVideoUrl ? <video key={activeVideo?.clip.id ?? "primary"} ref={videoRef} src={activeVideoUrl} muted playsInline style={previewZoomStyle(previewProject, currentTime)} onLoadedMetadata={(event) => { event.currentTarget.currentTime = activeVideo?.sourceTime ?? currentTime; }} onError={() => { setMediaState("error"); setError("The primary local video could not be decoded by this browser."); }} onTimeUpdate={(event) => { const active = videoClipAtTime(project.videoClips, currentTime); const time = active ? active.clip.timelineStart + event.currentTarget.currentTime - active.clip.sourceIn : event.currentTarget.currentTime; setCurrentTime(time); syncAudio(time, !event.currentTarget.paused); if (cameraRef.current && Math.abs(cameraRef.current.currentTime - time) > .15) cameraRef.current.currentTime = time; if (backgroundVideoRef.current && Math.abs(backgroundVideoRef.current.currentTime - event.currentTarget.currentTime) > .15) backgroundVideoRef.current.currentTime = event.currentTarget.currentTime; }} onEnded={() => { const next = activeVideo ? activeVideo.clip.timelineStart + videoClipDuration(activeVideo.clip) : project.duration; if (next < project.duration - .01) seek(next + .001); else { setPlaying(false); pauseAudio(); } }} /> : mediaState === "error" ? <div className="media-error"><strong>Local media could not be opened</strong><p>The recording may be missing from browser storage or use an unsupported format.</p><div><button className="secondary" onClick={() => { setError(""); setMediaState("loading"); setMediaRetry((value) => value + 1); }}>Retry</button><button className="text-button" onClick={onBack}>Return to Library</button></div></div> : <div className="loading-media">Loading local media…</div>}
             {mediaUrls.camera && project.camera.visible ? <CameraOverlay videoRef={cameraRef} src={mediaUrls.camera} project={project} commit={commit} /> : null}
             {tool === "crop" && !playing ? <CropOverlay rect={project.crop} onChange={(crop) => commit((value) => ({ ...value, crop }))} /> : null}
             {tool === "zoom" && selectedZoom && focalMarker ? <span className="zoom-focal" style={{ left: `${focalMarker.x * 100}%`, top: `${focalMarker.y * 100}%` }}>{selectedZoom.scale.toFixed(1)}×</span> : null}
@@ -253,8 +295,8 @@ export function EditorView({ initialProject, onBack }: { initialProject: StudioP
       </div>
       <aside className="inspector" aria-label={`${tool} inspector`}><div className="inspector-scroll">{tool === "crop" ? <CropInspector project={project} commit={commit} /> : tool === "presentation" ? <PresentationInspector project={project} commit={commit} /> : tool === "background" ? <BackgroundInspector project={project} commit={commit} onChooseImage={() => backgroundInputRef.current?.click()} /> : tool === "zoom" ? <ZoomInspector project={project} selected={selectedZoom} add={addZoom} select={(id) => { setSelectedZoomId(id); const zoom = project.zoomEvents.find((item) => item.id === id); if (zoom) seek(zoom.time); }} commit={commit} /> : tool === "cursor" ? <CursorInspector project={project} commit={commit} /> : <AudioInspector project={project} trackType={selectedClip?.trackType ?? selectedAudioTrack} selectedClip={selectedClip} commit={commit} onSelectTrack={(type) => { setSelectedAudioTrack(type); setSelectedClipId(undefined); }} onRecord={voiceoverState === "idle" ? startVoiceover : stopVoiceover} recording={voiceoverState !== "idle"} microphones={microphones} microphoneId={voiceoverDevice} setMicrophoneId={setVoiceoverDevice} monitorOriginal={monitorOriginal} setMonitorOriginal={setMonitorOriginal} onImport={() => musicInputRef.current?.click()} onDeleteClip={() => { if (!selectedClip) return; commit((value) => ({ ...value, audio: { ...value.audio, clips: value.audio.clips.filter((clip) => clip.id !== selectedClip.id) } })); setSelectedClipId(undefined); }} onDuplicateClip={() => { if (!selectedClip) return; const duplicate = { ...selectedClip, id: crypto.randomUUID(), startTime: Math.min(project.duration, selectedClip.startTime + .5) }; commit((value) => ({ ...value, audio: { ...value.audio, clips: [...value.audio.clips, duplicate] } })); setSelectedClipId(duplicate.id); }} />}</div></aside>
     </div>
-    <div className="timeline-panel"><div className="timeline-toolbar"><strong>Timeline</strong><button onClick={splitAtPlayhead}><HugeiconsIcon icon={ScissorIcon} size={15} /> Split</button><button onClick={() => { if (markOut > markIn) commit((value) => ({ ...value, edits: [...value.edits, { type: "delete", start: markIn, end: markOut }] })); }}><HugeiconsIcon icon={Delete02Icon} size={15} /> Delete range</button><button onClick={() => setMarkIn(currentTime)}>Set in</button><button onClick={() => setMarkOut(currentTime)}>Set out</button><span>{formatPrecise(markIn)} — {formatPrecise(markOut)}</span></div><TimelineView project={project} currentTime={currentTime} seek={seek} commit={commit} selectedClipId={selectedClipId} onSelectClip={(id) => { setSelectedClipId(id); if (id) { const clip = project.audio.clips.find((item) => item.id === id); if (clip) setSelectedAudioTrack(clip.trackType); setTool("audio"); } }} selectedZoomId={selectedZoomId} onSelectZoom={(id) => { setSelectedZoomId(id); setTool("zoom"); }} /><div className="trim-controls"><label>Trim start <input type="range" min={0} max={Math.max(project.duration, .1)} step=".1" value={project.trim.start} onChange={(event) => commit((value) => ({ ...value, trim: { ...value.trim, start: Math.min(Number(event.target.value), (value.trim.end ?? value.duration) - .1) } }))} /></label><label>Trim end <input type="range" min={0} max={Math.max(project.duration, .1)} step=".1" value={project.trim.end ?? project.duration} onChange={(event) => commit((value) => ({ ...value, trim: { ...value.trim, end: Math.max(Number(event.target.value), value.trim.start + .1) } }))} /></label></div></div>
-    <input ref={backgroundInputRef} hidden type="file" accept="image/*" onChange={(event) => { void importBackground(event.target.files?.[0]); event.target.value = ""; }} /><input ref={musicInputRef} hidden type="file" accept="audio/*,.mp3,.wav,.m4a,.aac" onChange={(event) => { void importMusic(event.target.files?.[0]); event.target.value = ""; }} />
+    <div className="timeline-panel"><div className="timeline-toolbar"><strong>Timeline</strong><button onClick={() => videoInputRef.current?.click()}><HugeiconsIcon icon={Add01Icon} size={15} /> Add video</button><button onClick={splitAtPlayhead}><HugeiconsIcon icon={ScissorIcon} size={15} /> Split</button><button disabled={!selectedVideoClipId} onClick={() => { if (!selectedVideoClipId) return; commit((value) => { const videoClips = normalizeVideoClips(value.videoClips.filter((clip) => clip.id !== selectedVideoClipId)); return { ...value, videoClips, duration: videoClips.reduce((sum, clip) => sum + videoClipDuration(clip), 0) }; }); setSelectedVideoClipId(undefined); }}><HugeiconsIcon icon={Delete02Icon} size={15} /> Delete clip</button><button onClick={() => { if (markOut <= markIn) return; commit((value) => { const videoClips = deleteVideoRange(value.videoClips, markIn, markOut); return { ...value, videoClips, duration: videoClips.reduce((sum, clip) => sum + videoClipDuration(clip), 0), trim: { start: 0, end: null } }; }); seek(markIn); setMarkOut(markIn); }}><HugeiconsIcon icon={Delete02Icon} size={15} /> Delete range</button><button onClick={() => { setMarkIn(currentTime); commit((value) => ({ ...value, trim: { ...value.trim, start: Math.min(currentTime, (value.trim.end ?? value.duration) - .05) } })); }}>Set in</button><button onClick={() => { setMarkOut(currentTime); commit((value) => ({ ...value, trim: { ...value.trim, end: Math.max(currentTime, value.trim.start + .05) } })); }}>Set out</button><span>{formatPrecise(markIn)} — {formatPrecise(markOut)}</span></div><TimelineView project={project} currentTime={currentTime} seek={seek} commit={commit} selectedClipId={selectedClipId} onSelectClip={(id) => { setSelectedClipId(id); if (id) { const clip = project.audio.clips.find((item) => item.id === id); if (clip) setSelectedAudioTrack(clip.trackType); setTool("audio"); } }} selectedVideoClipId={selectedVideoClipId} onSelectVideoClip={setSelectedVideoClipId} selectedZoomId={selectedZoomId} onSelectZoom={(id) => { setSelectedZoomId(id); setTool("zoom"); }} markIn={markIn} markOut={markOut} /><div className="trim-controls"><label>Trim start <input type="range" min={0} max={Math.max(project.duration, .1)} step=".1" value={project.trim.start} onChange={(event) => { const start = Math.min(Number(event.target.value), (project.trim.end ?? project.duration) - .1); commit((value) => ({ ...value, trim: { ...value.trim, start } })); setMarkIn(start); seek(start); }} /></label><label>Trim end <input type="range" min={0} max={Math.max(project.duration, .1)} step=".1" value={project.trim.end ?? project.duration} onChange={(event) => { const end = Math.max(Number(event.target.value), project.trim.start + .1); commit((value) => ({ ...value, trim: { ...value.trim, end } })); setMarkOut(end); seek(end); }} /></label></div></div>
+    <input ref={backgroundInputRef} hidden type="file" accept="image/*" onChange={(event) => { void importBackground(event.target.files?.[0]); event.target.value = ""; }} /><input ref={musicInputRef} hidden type="file" accept="audio/*,.mp3,.wav,.m4a,.aac" onChange={(event) => { void importMusic(event.target.files?.[0]); event.target.value = ""; }} /><input ref={videoInputRef} hidden type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" onChange={(event) => { void addVideo(event.target.files?.[0]); event.target.value = ""; }} />
     {showExportDialog ? <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowExportDialog(false); }}><form className="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" onSubmit={(event) => { event.preventDefault(); void runExport(exportName); }}><h2 id="export-title">Export MP4</h2><p>Name the recording before choosing where to save it.</p><label className="field-label">File name<input autoFocus value={exportName} onChange={(event) => setExportName(event.target.value)} placeholder={formatExportFallback()} /></label><small>.mp4 is added automatically. Invalid filename characters are replaced.</small><div className="dialog-actions"><button type="button" className="secondary" onClick={() => setShowExportDialog(false)}>Cancel</button><button className="primary" type="submit">Choose save location</button></div></form></div> : null}
     {error ? <p className="editor-toast error-message" role="alert">{error}</p> : null}{receipt ? <p className="editor-toast success-message" role="status">Validated {receipt.videoCodec.toUpperCase()}{receipt.audioCodec ? ` + ${receipt.audioCodec.toUpperCase()} ${receipt.sampleRate! / 1000} kHz stereo` : ""} · {receipt.width}×{receipt.height} · {formatBytes(receipt.size)}</p> : null}
   </section>;

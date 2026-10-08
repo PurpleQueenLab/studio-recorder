@@ -1,5 +1,5 @@
 import { LocalProjectStore } from "@/lib/storage/project-store";
-import { createProject, deriveZoomEvents } from "@/lib/project";
+import { createProject, deriveZoomEvents, primaryVideoSourceKind } from "@/lib/project";
 import { isStudioTabCapture, PointerCaptureSession } from "@/lib/media/pointer-capture";
 import { captureVideoBitrate, DEFAULT_CAPTURE_QUALITY, resolveActualQuality, supportFromTrack, videoConstraints } from "@/lib/media/quality";
 import type { CaptureQuality, ProjectSource, RecordingMode, StudioProject } from "@/types/project";
@@ -170,6 +170,8 @@ export class CaptureEngine {
     const completedProject = this.project;
     if (completedProject) {
       completedProject.duration = recordedDuration;
+      const videoKind = primaryVideoSourceKind(completedProject.mode);
+      completedProject.videoClips = [{ id: crypto.randomUUID(), sourceId: videoKind, name: completedProject.title, timelineStart: 0, sourceIn: 0, sourceOut: recordedDuration }];
       completedProject.zoomEvents = deriveZoomEvents(completedProject.pointerEvents);
       completedProject.updatedAt = new Date().toISOString();
       await this.store.putProject(completedProject);

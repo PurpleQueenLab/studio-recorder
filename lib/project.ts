@@ -1,4 +1,4 @@
-import type { AudioProjectState, AudioTrackType, NormalizedRect, PointerEventMetadata, RecordingMode, StudioProject, ZoomEvent } from "@/types/project";
+import type { AudioProjectState, AudioTrackType, NormalizedRect, PointerEventMetadata, RecordingMode, StudioProject, VideoClip, ZoomEvent } from "@/types/project";
 import { DEFAULT_CAPTURE_QUALITY } from "@/lib/media/quality";
 
 export const FULL_FRAME: NormalizedRect = { x: 0, y: 0, width: 1, height: 1 };
@@ -116,6 +116,7 @@ export function createProject(mode: RecordingMode, now = new Date()): StudioProj
     presentation: { scale: .88, x: .5, y: .5, padding: .06, cornerRadius: 18, shadow: .7, frame: "floating" },
     audio: createDefaultAudioState(),
     assets: [],
+    videoClips: [],
     trim: { start: 0, end: null },
     edits: [],
   };
@@ -123,6 +124,15 @@ export function createProject(mode: RecordingMode, now = new Date()): StudioProj
 
 export function normalizeProject(project: StudioProject): StudioProject {
   const audioDefaults = createDefaultAudioState();
+  const legacySource = primaryVideoSourceKind(project.mode);
+  const videoClips = normalizeVideoClips(project.videoClips?.length ? project.videoClips : project.duration > 0 && project.sources?.some((source) => source.kind === legacySource) ? [{
+    id: `legacy-video-${project.id}`,
+    sourceId: legacySource,
+    name: project.title,
+    timelineStart: 0,
+    sourceIn: 0,
+    sourceOut: project.duration,
+  }] : []);
   return {
     ...project,
     quality: project.quality ?? { ...DEFAULT_CAPTURE_QUALITY },
@@ -149,9 +159,76 @@ export function normalizeProject(project: StudioProject): StudioProject {
       ducking: project.audio?.ducking ?? audioDefaults.ducking,
     },
     assets: project.assets ?? [],
+    videoClips,
+    duration: videoClips.length ? videoTimelineDuration(videoClips) : project.duration,
     trim: project.trim ?? { start: 0, end: null },
     edits: project.edits ?? [],
   };
+}
+
+export function videoClipDuration(clip: VideoClip): number {
+  return Math.max(0, clip.sourceOut - clip.sourceIn);
+}
+
+export function normalizeVideoClips(clips: VideoClip[]): VideoClip[] {
+  let timelineStart = 0;
+  return clips.filter((clip) => videoClipDuration(clip) >= .05).map((clip) => {
+    const next = { ...clip, timelineStart };
+    timelineStart += videoClipDuration(clip);
+    return next;
+  });
+}
+
+export function videoTimelineDuration(clips: VideoClip[]): number {
+  return clips.reduce((total, clip) => total + videoClipDuration(clip), 0);
+}
+
+export function videoClipAtTime(clips: VideoClip[], time: number): { clip: VideoClip; sourceTime: number } | undefined {
+  const clip = clips.find((item, index) => time >= item.timelineStart && (time < item.timelineStart + videoClipDuration(item) || index === clips.length - 1));
+  return clip ? { clip, sourceTime: clip.sourceIn + Math.min(videoClipDuration(clip), Math.max(0, time - clip.timelineStart)) } : undefined;
+}
+
+export function splitVideoClip(clips: VideoClip[], clipId: string, timelineTime: number, secondId = crypto.randomUUID()): VideoClip[] {
+  return normalizeVideoClips(clips.flatMap((clip) => {
+    if (clip.id !== clipId) return [clip];
+    const offset = timelineTime - clip.timelineStart;
+    if (offset <= .05 || offset >= videoClipDuration(clip) - .05) return [clip];
+    const cut = clip.sourceIn + offset;
+    return [{ ...clip, sourceOut: cut }, { ...clip, id: secondId, name: `${clip.name} split`, sourceIn: cut }];
+  }));
+}
+
+export function trimVideoClip(clips: VideoClip[], clipId: string, edge: "start" | "end", delta: number): VideoClip[] {
+  return normalizeVideoClips(clips.map((clip) => {
+    if (clip.id !== clipId) return clip;
+    return edge === "start"
+      ? { ...clip, sourceIn: Math.min(clip.sourceOut - .05, Math.max(0, clip.sourceIn + delta)) }
+      : { ...clip, sourceOut: Math.max(clip.sourceIn + .05, clip.sourceOut + delta) };
+  }));
+}
+
+export function reorderVideoClip(clips: VideoClip[], clipId: string, targetIndex: number): VideoClip[] {
+  const current = clips.findIndex((clip) => clip.id === clipId);
+  if (current < 0) return clips;
+  const next = [...clips];
+  const [clip] = next.splice(current, 1);
+  next.splice(Math.min(next.length, Math.max(0, targetIndex)), 0, clip);
+  return normalizeVideoClips(next);
+}
+
+export function deleteVideoRange(clips: VideoClip[], start: number, end: number): VideoClip[] {
+  if (end - start < .05) return clips;
+  return normalizeVideoClips(clips.flatMap((clip) => {
+    const clipStart = clip.timelineStart;
+    const clipEnd = clipStart + videoClipDuration(clip);
+    if (end <= clipStart || start >= clipEnd) return [clip];
+    const before = Math.max(0, start - clipStart);
+    const after = Math.max(0, clipEnd - end);
+    const result: VideoClip[] = [];
+    if (before >= .05) result.push({ ...clip, sourceOut: clip.sourceIn + before });
+    if (after >= .05) result.push({ ...clip, id: crypto.randomUUID(), name: `${clip.name} remainder`, sourceIn: clip.sourceOut - after });
+    return result;
+  }));
 }
 
 export function formatDefaultFilename(date: Date): string {

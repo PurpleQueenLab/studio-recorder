@@ -58,11 +58,20 @@ export interface ProjectSource {
 
 export interface ProjectAsset {
   id: string;
-  kind: "voiceover" | "music" | "background-image";
+  kind: "voiceover" | "music" | "background-image" | "video" | "thumbnail";
   name: string;
   mimeType: string;
   chunkCount: number;
   duration?: number;
+}
+
+export interface VideoClip {
+  id: string;
+  sourceId: string;
+  name: string;
+  timelineStart: number;
+  sourceIn: number;
+  sourceOut: number;
 }
 
 export interface AudioTrackSettings {
@@ -133,6 +142,8 @@ export interface StudioProject {
   presentation: PresentationSettings;
   audio: AudioProjectState;
   assets: ProjectAsset[];
+  videoClips: VideoClip[];
+  thumbnailAssetId?: string;
   trim: { start: number; end: number | null };
   edits: Array<{ type: "trim" | "split" | "delete"; start: number; end: number }>;
 }

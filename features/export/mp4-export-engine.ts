@@ -12,10 +12,11 @@ import {
   StreamTarget,
   VideoSample,
   VideoSampleSink,
+  VideoSampleSource,
   type StreamTargetChunk,
 } from "mediabunny";
 import { LocalProjectStore } from "@/lib/storage/project-store";
-import { editedTimestamp, formatExportFallback, primaryVideoSourceKind, sanitizeFilename } from "@/lib/project";
+import { editedTimestamp, formatExportFallback, primaryVideoSourceKind, sanitizeFilename, videoClipDuration } from "@/lib/project";
 import { previewPointFromSource, zoomSourceRect, zoomTransformAt } from "@/lib/editor/composition";
 import { cameraPixelRect, coverSourceRect } from "@/lib/editor/camera-geometry";
 import { renderProjectAudioMix } from "@/lib/media/audio-mixer";
@@ -75,7 +76,7 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
   onProgress(.01, "Preparing video");
   const store = new LocalProjectStore();
   const videoKind = primaryVideoSourceKind(project.mode);
-  const videoBlob = await sourceBlob(store, project, videoKind);
+  const videoBlob = await clipSourceBlob(store, project, project.videoClips[0]?.sourceId ?? videoKind);
   const cameraBlob = project.mode === "screen-camera" ? await sourceBlob(store, project, "camera") : null;
   if (!videoBlob) throw new Error("The project has no recoverable video source.");
   const audioBuffer = await renderProjectAudioMix(project, store);
@@ -119,7 +120,8 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
   const compositor = createCompositor(project, outputSize.width, outputSize.height, cameraSink, backgroundBitmap);
   const trim = { start: project.trim.start, end: project.trim.end ?? project.duration };
 
-  const videoConversion = await Conversion.init({
+  const useClipTimeline = project.videoClips.length > 1 || project.videoClips.some((clip) => clip.sourceId !== videoKind || clip.sourceIn > .001 || clip.sourceOut < project.duration - .001);
+  const videoConversion = useClipTimeline ? null : await Conversion.init({
     input: videoInput,
     output,
     composable: true,
@@ -138,17 +140,22 @@ export async function exportCompatibleMp4(project: StudioProject, onProgress: Ex
     },
     showWarnings: false,
   });
-  if (!videoConversion.isValid) throw new Error("H.264 encoding is not supported by this browser/device.");
+  if (videoConversion && !videoConversion.isValid) throw new Error("H.264 encoding is not supported by this browser/device.");
+  let timelineVideo: VideoSampleSource | undefined;
+  if (useClipTimeline) {
+    timelineVideo = new VideoSampleSource({ codec: "avc", quality: new Quality({ bitrate: exportVideoBitrate(project.quality.resolution, project.quality.frameRate, project.quality.level), bitrateMode: "variable" }) });
+    output.addVideoTrack(timelineVideo, { frameRate: project.quality.frameRate });
+  }
 
   let audioSource: AudioBufferSource | undefined;
   if (audioBuffer) {
     audioSource = new AudioBufferSource({ codec: "aac", quality: new Quality("high") });
     output.addAudioTrack(audioSource, { name: "Studio Recorder mix" });
   }
-  videoConversion.onProgress = (value) => onProgress(.1 + value * .78, "Rendering");
+  if (videoConversion) videoConversion.onProgress = (value) => onProgress(.1 + value * .78, "Rendering");
   await output.start();
   try {
-    await Promise.all([videoConversion.execute(), audioSource?.add(audioBuffer!)]);
+    await Promise.all([videoConversion ? videoConversion.execute() : renderClipTimeline(project, store, timelineVideo!, compositor, onProgress), audioSource?.add(audioBuffer!)]);
   } finally {
     backgroundBitmap?.close();
   }
@@ -178,6 +185,42 @@ async function sourceBlob(store: LocalProjectStore, project: StudioProject, kind
   if (!descriptor) return null;
   const chunks = await store.getChunks(project.id, kind);
   return chunks.length ? new Blob(chunks, { type: descriptor.mimeType }) : null;
+}
+
+async function clipSourceBlob(store: LocalProjectStore, project: StudioProject, sourceId: string): Promise<Blob | null> {
+  const asset = project.assets.find((item) => item.id === sourceId);
+  if (asset) { const chunks = await store.getChunks(project.id, sourceId); return chunks.length ? new Blob(chunks, { type: asset.mimeType }) : null; }
+  return sourceBlob(store, project, sourceId);
+}
+
+async function renderClipTimeline(project: StudioProject, store: LocalProjectStore, target: VideoSampleSource, fallbackCompositor: ReturnType<typeof createCompositor>, onProgress: ExportProgress) {
+  const frameDuration = 1 / project.quality.frameRate;
+  const trimEnd = project.trim.end ?? project.duration;
+  let rendered = 0;
+  const expected = Math.max(1, Math.ceil((trimEnd - project.trim.start) / frameDuration));
+  for (const clip of project.videoClips) {
+    const blob = await clipSourceBlob(store, project, clip.sourceId);
+    if (!blob) throw new Error(`The source for “${clip.name}” is missing from local storage.`);
+    const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(blob) });
+    const track = await input.getPrimaryVideoTrack();
+    if (!track || !(await track.canDecode())) throw new Error(`The browser cannot decode “${clip.name}”.`);
+    const sink = new VideoSampleSink(track, { optimizeForLatency: true });
+    const start = Math.max(clip.timelineStart, project.trim.start);
+    const end = Math.min(clip.timelineStart + videoClipDuration(clip), trimEnd);
+    for (let timelineTime = start; timelineTime < end - frameDuration / 2; timelineTime += frameDuration) {
+      const sourceTime = clip.sourceIn + timelineTime - clip.timelineStart;
+      const sample = await sink.getSample(sourceTime);
+      if (!sample) continue;
+      const frame = sample.toVideoFrame();
+      const shifted = new VideoSample(frame, { timestamp: timelineTime - project.trim.start, duration: frameDuration });
+      const mapped = await fallbackCompositor(shifted);
+      shifted.close(); frame.close();
+      sample.close();
+      if (mapped) { await target.add(mapped, rendered % (project.quality.frameRate * 2) === 0 ? { keyFrame: true } : undefined); mapped.close(); }
+      rendered += 1;
+      if (rendered % 12 === 0) onProgress(.1 + Math.min(1, rendered / expected) * .78, "Rendering");
+    }
+  }
 }
 
 export function outputDimensions(project: StudioProject) {

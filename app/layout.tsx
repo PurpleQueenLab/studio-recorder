@@ -7,8 +7,8 @@ export const metadata: Metadata = {
   description: "A private, local-first screen recorder and editor.",
   applicationName: "Studio Recorder",
   icons: {
-    icon: [{ url: "/studio-recorder-logo.png", type: "image/png", sizes: "17x17" }],
-    apple: [{ url: "/studio-recorder-brand.png", type: "image/png", sizes: "36x36" }],
+    icon: [{ url: "/favicon-light.png", type: "image/png" }],
+    apple: [{ url: "/favicon-light.png", type: "image/png" }],
   },
   manifest: "/manifest.webmanifest",
 };
