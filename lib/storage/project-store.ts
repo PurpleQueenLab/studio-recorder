@@ -1,8 +1,8 @@
-import type { StudioProject } from "@/types/project";
+import type { AudioToolsProject, StudioProject } from "@/types/project";
 import { normalizeProject } from "@/lib/project";
 
 const DB_NAME = "studio-recorder";
-const VERSION = 1;
+const VERSION = 2;
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -32,6 +32,7 @@ export class LocalProjectStore {
         const chunks = db.createObjectStore("chunks", { keyPath: ["projectId", "source", "index"] });
         chunks.createIndex("by-project-source", ["projectId", "source"]);
       }
+      if (!db.objectStoreNames.contains("audio-tools")) db.createObjectStore("audio-tools", { keyPath: "id" });
     };
     this.db = await requestResult(request);
   }
@@ -87,5 +88,17 @@ export class LocalProjectStore {
     const blob = new Blob(chunks, { type: descriptor.mimeType });
     if (!blob.size) throw new Error("The saved primary video is empty.");
     return blob;
+  }
+
+  async putAudioToolsProject(project: AudioToolsProject): Promise<void> {
+    await this.open();
+    const transaction = this.db!.transaction("audio-tools", "readwrite");
+    const completed = transactionComplete(transaction);
+    await Promise.all([requestResult(transaction.objectStore("audio-tools").put(project)), completed]);
+  }
+
+  async getAudioToolsProject(): Promise<AudioToolsProject | undefined> {
+    await this.open();
+    return requestResult<AudioToolsProject | undefined>(this.db!.transaction("audio-tools").objectStore("audio-tools").get("current"));
   }
 }

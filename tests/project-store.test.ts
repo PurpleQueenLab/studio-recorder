@@ -39,4 +39,15 @@ describe("LocalProjectStore", () => {
     await expect((await store.validatePrimaryMedia(project, "screen")).text()).resolves.toBe("firstsecond");
     await store.deleteProject(project.id);
   });
+
+  it("H: restores a complete standalone audio workspace including edits and source media", async () => {
+    const store = new LocalProjectStore();
+    await store.putAudioToolsProject({
+      id: "current", name: "local.wav", exportName: "Edited local", mimeType: "audio/wav", blob: new Blob(["audio"]),
+      duration: 8, waveform: [.2, .7], trimStart: 1, trimEnd: 6, volume: .55, fadeIn: .4, fadeOut: .8, updatedAt: "2026-10-09T10:00:00.000Z",
+    });
+    const reopened = await new LocalProjectStore().getAudioToolsProject();
+    expect(reopened).toMatchObject({ name: "local.wav", exportName: "Edited local", trimStart: 1, trimEnd: 6, volume: .55, fadeIn: .4, fadeOut: .8 });
+    expect(await reopened?.blob.text()).toBe("audio");
+  });
 });

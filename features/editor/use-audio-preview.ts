@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { clipGainAt, duckingMultiplier, trackFadeAt, trackIsAudible } from "@/lib/media/audio-mixer";
+import { audioMixGainAt, audioMixHeadroom, audioMixItems, trackIsAudible } from "@/lib/media/audio-mixer";
 import type { AudioClip, AudioTrackType, StudioProject } from "@/types/project";
 
 export function useAudioPreview(project: StudioProject, urls: Record<string, string>) {
@@ -30,19 +30,24 @@ export function useAudioPreview(project: StudioProject, urls: Record<string, str
 
   const sync = useCallback((time: number, playing: boolean) => {
     const currentProject = projectRef.current;
-    const original = (["microphone", "computer-audio"] as const).map((type) => ({
-      key: type,
-      clip: { id: type, sourceId: type, trackType: type, startTime: 0, sourceIn: 0, sourceOut: currentProject.duration, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 } satisfies AudioClip,
-    }));
-    const clips = currentProject.audio.clips.map((clip) => ({ key: clip.sourceId, clip }));
-    for (const { key, clip } of [...original, ...clips]) syncElement(elements.current.get(key), clip, currentProject, time, playing);
+    const headroom = audioMixHeadroom(currentProject);
+    const bySource = new Map<string, AudioClip[]>();
+    for (const { key, clip } of audioMixItems(currentProject)) bySource.set(key, [...(bySource.get(key) ?? []), clip]);
+    for (const [key, clips] of bySource) {
+      const active = clips.find((clip) => {
+        const localTime = time - clip.startTime;
+        return !clip.muted && trackIsAudible(currentProject, clip.trackType) && localTime >= 0 && localTime < clip.sourceOut - clip.sourceIn;
+      });
+      if (active) syncElement(elements.current.get(key), active, currentProject, time, playing, headroom);
+      else elements.current.get(key)?.pause();
+    }
   }, []);
 
   const pause = useCallback(() => elements.current.forEach((audio) => audio.pause()), []);
   return { sync, pause };
 }
 
-function syncElement(audio: HTMLAudioElement | undefined, clip: AudioClip, project: StudioProject, time: number, playing: boolean) {
+function syncElement(audio: HTMLAudioElement | undefined, clip: AudioClip, project: StudioProject, time: number, playing: boolean, headroom: number) {
   if (!audio) return;
   const localTime = time - clip.startTime;
   const duration = clip.sourceOut - clip.sourceIn;
@@ -50,8 +55,7 @@ function syncElement(audio: HTMLAudioElement | undefined, clip: AudioClip, proje
   if (!audible) { audio.pause(); return; }
   const expected = clip.sourceIn + localTime;
   if (Math.abs(audio.currentTime - expected) > .12) audio.currentTime = Math.max(0, expected);
-  const track = project.audio.tracks[clip.trackType];
-  audio.volume = Math.min(1, Math.max(0, track.volume * clipGainAt(clip, localTime) * trackFadeAt(project, clip.trackType, time) * duckingMultiplier(project, clip.trackType, time)));
+  audio.volume = Math.min(1, audioMixGainAt(project, clip, time, headroom));
   if (playing && audio.paused) void audio.play().catch(() => undefined);
   else if (!playing) audio.pause();
 }

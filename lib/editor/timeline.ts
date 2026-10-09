@@ -18,6 +18,23 @@ export function adjustAudioClip(clip: AudioClip, mode: "move" | "start" | "end",
   return { ...clip, sourceOut: Math.max(clip.sourceIn + .1, Math.min(clip.sourceOut + delta, clip.sourceOut + Math.max(0, projectDuration - clip.startTime - duration))) };
 }
 
+export function deleteAudioRange(clips: AudioClip[], start: number, end: number): AudioClip[] {
+  if (end - start < .05) return clips;
+  const removed = end - start;
+  return clips.flatMap((clip) => {
+    const clipStart = clip.startTime;
+    const clipEnd = clipStart + clip.sourceOut - clip.sourceIn;
+    if (clipEnd <= start) return [clip];
+    if (clipStart >= end) return [{ ...clip, startTime: Math.max(0, clip.startTime - removed) }];
+    const before = Math.max(0, start - clipStart);
+    const after = Math.max(0, clipEnd - end);
+    const result: AudioClip[] = [];
+    if (before >= .05) result.push({ ...clip, sourceOut: clip.sourceIn + before });
+    if (after >= .05) result.push({ ...clip, id: crypto.randomUUID(), startTime: start, sourceIn: clip.sourceOut - after });
+    return result;
+  });
+}
+
 export function adjustZoomEvent(event: ZoomEvent, mode: "move" | "start" | "end", delta: number, projectDuration: number): ZoomEvent {
   if (mode === "move") return { ...event, time: Math.max(0, Math.min(projectDuration - event.duration, event.time + delta)) };
   if (mode === "start") {

@@ -1,10 +1,16 @@
 import { LocalProjectStore } from "@/lib/storage/project-store";
+import { primaryVideoSourceKind } from "@/lib/project";
 import type { AudioClip, AudioTrackType, StudioProject } from "@/types/project";
 
 export interface TimelineSegment {
   sourceStart: number;
   sourceEnd: number;
   outputStart: number;
+}
+
+export interface AudioMixItem {
+  key: string;
+  clip: AudioClip;
 }
 
 export function visibleTimelineSegments(project: StudioProject): TimelineSegment[] {
@@ -71,6 +77,40 @@ export function clipGainAt(clip: Pick<AudioClip, "volume" | "fadeIn" | "fadeOut"
   return clip.volume * Math.max(0, Math.min(fadeIn, fadeOut, 1));
 }
 
+export function audioMixItems(project: StudioProject): AudioMixItem[] {
+  const items: AudioMixItem[] = [];
+  const primaryVideo = primaryVideoSourceKind(project.mode);
+  const sourceTimeline = project.videoClips.filter((clip) => clip.sourceId === primaryVideo);
+  for (const type of ["microphone", "computer-audio"] as const) {
+    if (!project.sources.some((source) => source.kind === type)) continue;
+    const clips = sourceTimeline.length ? sourceTimeline : [{ id: "full", timelineStart: 0, sourceIn: 0, sourceOut: project.duration }];
+    items.push(...clips.map((video) => ({
+      key: type,
+      clip: { id: `${type}-${video.id}`, sourceId: type, trackType: type, startTime: video.timelineStart, sourceIn: video.sourceIn, sourceOut: video.sourceOut, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+    })));
+  }
+  items.push(...project.audio.clips.map((clip) => ({ key: clip.sourceId, clip })));
+  items.push(...project.videoClips.filter((video) => project.assets.some((asset) => asset.id === video.sourceId && asset.kind === "video")).map((video) => ({
+    key: video.sourceId,
+    clip: { id: `video-audio-${video.id}`, sourceId: video.sourceId, trackType: "computer-audio" as const, startTime: video.timelineStart, sourceIn: video.sourceIn, sourceOut: video.sourceOut, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
+  })));
+  return items;
+}
+
+export function audioMixHeadroom(project: StudioProject): number {
+  const activeTrackCount = new Set(audioMixItems(project)
+    .filter(({ clip }) => !clip.muted && trackIsAudible(project, clip.trackType))
+    .map(({ clip }) => clip.trackType)).size;
+  return .82 / Math.sqrt(Math.max(1, activeTrackCount));
+}
+
+export function audioMixGainAt(project: StudioProject, clip: AudioClip, timelineTime: number, headroom = audioMixHeadroom(project)): number {
+  const localTime = timelineTime - clip.startTime;
+  if (clip.muted || !trackIsAudible(project, clip.trackType) || localTime < 0 || localTime >= clip.sourceOut - clip.sourceIn) return 0;
+  const track = project.audio.tracks[clip.trackType];
+  return track.volume * headroom * clipGainAt(clip, localTime) * trackFadeAt(project, clip.trackType, timelineTime) * duckingMultiplier(project, clip.trackType, timelineTime);
+}
+
 export async function createWaveform(blob: Blob, points = 120): Promise<number[]> {
   if (blob.size > 200 * 1024 * 1024) return [];
   const context = new AudioContext();
@@ -95,51 +135,33 @@ export async function renderProjectAudioMix(project: StudioProject, store: Local
   const duration = outputDuration(project);
   if (!segments.length || duration <= 0) return null;
 
-  const items: Array<{ clip: AudioClip; blob: Blob }> = [];
-  for (const type of ["microphone", "computer-audio"] as const) {
-    if (!trackIsAudible(project, type)) continue;
-    const descriptor = project.sources.find((source) => source.kind === type);
-    if (!descriptor) continue;
-    const chunks = await store.getChunks(project.id, type);
-    if (!chunks.length) continue;
-    items.push({
-      clip: { id: type, sourceId: type, trackType: type, startTime: 0, sourceIn: 0, sourceOut: project.duration, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
-      blob: new Blob(chunks, { type: descriptor.mimeType }),
-    });
-  }
-  for (const clip of project.audio.clips) {
+  const items: Array<{ clip: AudioClip; blob: Blob; optional: boolean }> = [];
+  for (const { clip } of audioMixItems(project)) {
     if (clip.muted || !trackIsAudible(project, clip.trackType)) continue;
+    const descriptor = project.sources.find((source) => source.kind === clip.sourceId);
     const asset = project.assets.find((item) => item.id === clip.sourceId);
-    if (!asset) continue;
     const chunks = await store.getChunks(project.id, clip.sourceId);
-    if (chunks.length) items.push({ clip, blob: new Blob(chunks, { type: asset.mimeType }) });
-  }
-  for (const video of project.videoClips) {
-    const asset = project.assets.find((item) => item.id === video.sourceId && item.kind === "video");
-    if (!asset || !trackIsAudible(project, "computer-audio")) continue;
-    const chunks = await store.getChunks(project.id, video.sourceId);
-    if (chunks.length) items.push({
-      clip: { id: `video-audio-${video.id}`, sourceId: video.sourceId, trackType: "computer-audio", startTime: video.timelineStart, sourceIn: video.sourceIn, sourceOut: video.sourceOut, volume: 1, muted: false, fadeIn: 0, fadeOut: 0 },
-      blob: new Blob(chunks, { type: asset.mimeType }),
-    });
+    if (!chunks.length) {
+      if (asset?.kind === "music" || asset?.kind === "voiceover") throw new Error(`The local audio for “${asset.name}” is missing. Re-import it before exporting.`);
+      continue;
+    }
+    items.push({ clip, blob: new Blob(chunks, { type: asset?.mimeType ?? descriptor?.mimeType }), optional: asset?.kind === "video" });
   }
   if (!items.length) return null;
 
-  const decodeContext = new AudioContext({ sampleRate: 48_000 });
-  let decoded: Array<{ clip: AudioClip; buffer: AudioBuffer }>;
-  try {
-    decoded = (await Promise.all(items.map(async ({ clip, blob }) => {
-      try { return { clip, buffer: await decodeContext.decodeAudioData(await blob.arrayBuffer()) }; } catch { return null; }
-    }))).filter((item): item is { clip: AudioClip; buffer: AudioBuffer } => Boolean(item));
-  } finally {
-    await decodeContext.close();
-  }
+  const decoded = (await Promise.all(items.map(async ({ clip, blob, optional }) => {
+    const buffer = await decodeAudioBlob(blob);
+    if (!buffer) {
+      if (optional) return null;
+      throw new Error(`The browser could not decode the ${clip.trackType} audio for MP4 export.`);
+    }
+    return { clip, buffer };
+  }))).filter((item): item is { clip: AudioClip; buffer: AudioBuffer } => Boolean(item));
+  if (!decoded.length) return null;
 
   const offline = new OfflineAudioContext(2, Math.max(1, Math.ceil(duration * 48_000)), 48_000);
-  const activeTrackCount = new Set(decoded.map((item) => item.clip.trackType)).size;
-  const headroom = .82 / Math.sqrt(Math.max(1, activeTrackCount));
+  const headroom = audioMixHeadroom(project);
   for (const { clip, buffer } of decoded) {
-    const track = project.audio.tracks[clip.trackType];
     const clipEnd = clip.startTime + clip.sourceOut - clip.sourceIn;
     for (const segment of segments) {
       const intersectionStart = Math.max(segment.sourceStart, clip.startTime);
@@ -149,15 +171,44 @@ export async function renderProjectAudioMix(project: StudioProject, store: Local
       source.buffer = buffer;
       const gain = offline.createGain();
       const localStart = intersectionStart - clip.startTime;
-      const localEnd = intersectionEnd - clip.startTime;
       const when = segment.outputStart + intersectionStart - segment.sourceStart;
-      const base = track.volume * headroom;
-      const gainAt = (localTime: number, timelineTime: number) => base * clipGainAt(clip, localTime) * trackFadeAt(project, clip.trackType, timelineTime) * duckingMultiplier(project, clip.trackType, timelineTime);
-      gain.gain.setValueAtTime(gainAt(localStart, intersectionStart), when);
-      gain.gain.linearRampToValueAtTime(gainAt(localEnd, intersectionEnd), when + intersectionEnd - intersectionStart);
+      const mixDuration = intersectionEnd - intersectionStart;
+      const points = Math.max(2, Math.ceil(mixDuration * 50) + 1);
+      const curve = Float32Array.from({ length: points }, (_, index) => audioMixGainAt(project, clip, intersectionStart + mixDuration * index / (points - 1), headroom));
+      gain.gain.setValueCurveAtTime(curve, when, mixDuration);
       source.connect(gain).connect(offline.destination);
-      source.start(when, clip.sourceIn + localStart, intersectionEnd - intersectionStart);
+      source.start(when, clip.sourceIn + localStart, mixDuration);
     }
   }
   return offline.startRendering();
+}
+
+async function decodeAudioBlob(blob: Blob): Promise<AudioBuffer | null> {
+  const context = new AudioContext({ sampleRate: 48_000 });
+  try {
+    try { return await context.decodeAudioData(await blob.arrayBuffer()); }
+    catch { /* Fall back to MediaBunny's container-aware decoder. */ }
+  } finally {
+    await context.close();
+  }
+  const { ALL_FORMATS, AudioBufferSink, BlobSource, Input } = await import("mediabunny");
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(blob) });
+  const track = await input.getPrimaryAudioTrack();
+  if (!track || !(await track.canDecode())) return null;
+  const decoded: Array<{ buffer: AudioBuffer; timestamp: number; duration: number }> = [];
+  for await (const value of new AudioBufferSink(track).buffers()) decoded.push(value);
+  if (!decoded.length) return null;
+  const sampleRate = decoded[0].buffer.sampleRate;
+  const firstTimestamp = decoded[0].timestamp;
+  const end = Math.max(...decoded.map((value) => value.timestamp + value.duration));
+  const channels = Math.max(...decoded.map((value) => value.buffer.numberOfChannels));
+  const combined = new AudioBuffer({ numberOfChannels: channels, length: Math.max(1, Math.ceil((end - firstTimestamp) * sampleRate)), sampleRate });
+  for (const value of decoded) {
+    if (value.buffer.sampleRate !== sampleRate) throw new Error("Audio sample rate changed inside one source.");
+    const offset = Math.max(0, Math.round((value.timestamp - firstTimestamp) * sampleRate));
+    for (let channel = 0; channel < channels; channel += 1) {
+      combined.copyToChannel(value.buffer.getChannelData(Math.min(channel, value.buffer.numberOfChannels - 1)), channel, offset);
+    }
+  }
+  return combined;
 }
